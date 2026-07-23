@@ -46,7 +46,14 @@ class PlaywrightDriver:
         }
         if executable_path:
             options["executable_path"] = executable_path
-        self._browser: Browser = self._playwright.chromium.launch(**options)
+        try:
+            self._browser: Browser = self._playwright.chromium.launch(**options)
+        except BaseException:
+            # A failed launch still owns Playwright's event-loop/greenlet state.
+            # Release it or every later sync driver in this process fails with the
+            # misleading "inside the asyncio loop" error.
+            self._playwright.stop()
+            raise
         self._context: BrowserContext = self._browser.new_context(
             viewport={"width": 1440, "height": 900}
         )

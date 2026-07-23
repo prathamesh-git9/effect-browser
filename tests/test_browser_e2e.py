@@ -76,6 +76,11 @@ def test_real_browser_upload_is_allowlisted_hash_bound_and_path_redacted(
     driver = PlaywrightDriver(
         executable_path=edge_executable(),
         headless=True,
+        sandbox=os.getenv(
+            "EFFECT_BROWSER_BROWSER_SANDBOX",
+            "true",
+        ).casefold()
+        not in {"0", "false", "no", "off"},
         artifacts_directory=tmp_path / "artifacts",
         allowed_upload_roots=(upload_root,),
     )
