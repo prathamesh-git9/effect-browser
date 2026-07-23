@@ -253,9 +253,7 @@ class DatabaseStore:
         inspector = inspect(self.engine)
         tables = set(inspector.get_table_names())
         if "approvals" in tables:
-            columns = {
-                column["name"] for column in inspector.get_columns("approvals")
-            }
+            columns = {column["name"] for column in inspector.get_columns("approvals")}
             if "payload_sha256" not in columns:
                 if self.engine.dialect.name == "postgresql":
                     statement = (
@@ -273,9 +271,7 @@ class DatabaseStore:
         if "demo_job_applications" in tables:
             columns = {
                 column["name"]
-                for column in inspect(self.engine).get_columns(
-                    "demo_job_applications"
-                )
+                for column in inspect(self.engine).get_columns("demo_job_applications")
             }
             additions = {
                 "resume_filename": "VARCHAR(255)",
@@ -285,9 +281,7 @@ class DatabaseStore:
                 if name in columns:
                     continue
                 qualifier = (
-                    " IF NOT EXISTS"
-                    if self.engine.dialect.name == "postgresql"
-                    else ""
+                    " IF NOT EXISTS" if self.engine.dialect.name == "postgresql" else ""
                 )
                 with self.engine.begin() as connection:
                     connection.exec_driver_sql(

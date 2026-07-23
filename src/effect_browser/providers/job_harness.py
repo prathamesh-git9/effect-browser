@@ -42,9 +42,7 @@ class JobHarnessPlanner:
                 kind=ActionKind.UPLOAD,
                 locator=Locator(label="Résumé document"),
                 file_path=self.resume_path.resolve(),
-                document_sha256=hashlib.sha256(
-                    self.resume_path.read_bytes()
-                ).hexdigest(),
+                document_sha256=hashlib.sha256(self.resume_path.read_bytes()).hexdigest(),
                 description="Attach the approved synthetic résumé document.",
             ),
         )

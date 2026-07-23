@@ -86,9 +86,7 @@ class GenericFormStepPlanner:
 
 def reactive_service(base_url: str) -> EffectBrowserService:
     settings = get_settings()
-    resume_path = (
-        settings.allowed_upload_roots[0] / "synthetic-resume.txt"
-    ).resolve()
+    resume_path = (settings.allowed_upload_roots[0] / "synthetic-resume.txt").resolve()
     return EffectBrowserService(
         api.get_store(),
         ActionPolicy((base_url,), settings.allowed_upload_roots),
@@ -155,9 +153,7 @@ def prepare_reactive_task(
     assert outgoing.method == "POST"
     assert outgoing.target == f"{base_url}/demo-jobs/api/applications"
     assert outgoing.content_type == "multipart/form-data"
-    assert outgoing.document_sha256s == (
-        submit.proposal.outgoing_review.document_sha256s
-    )
+    assert outgoing.document_sha256s == (submit.proposal.outgoing_review.document_sha256s)
     assert outgoing_fields["job_slug"] == "platform-reliability-engineer"
     assert outgoing_fields["years_python"] == "6"
     assert (

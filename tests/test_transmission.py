@@ -59,14 +59,18 @@ def test_urlencoded_request_keeps_duplicate_fields_in_order() -> None:
 def test_multipart_fingerprint_ignores_boundary_but_binds_file_bytes() -> None:
     def body(boundary: str, document: bytes) -> bytes:
         return (
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="full_name"\r\n\r\n'
-            "Synthetic Candidate\r\n"
-            f"--{boundary}\r\n"
-            'Content-Disposition: form-data; name="resume"; '
-            'filename="synthetic-resume.txt"\r\n'
-            "Content-Type: text/plain\r\n\r\n"
-        ).encode() + document + f"\r\n--{boundary}--\r\n".encode()
+            (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="full_name"\r\n\r\n'
+                "Synthetic Candidate\r\n"
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="resume"; '
+                'filename="synthetic-resume.txt"\r\n'
+                "Content-Type: text/plain\r\n\r\n"
+            ).encode()
+            + document
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
 
     first = fingerprint_request(
         method="POST",

@@ -499,9 +499,7 @@ class EffectBrowserService:
                 ActionKind.NAVIGATE,
                 ActionKind.FILL,
                 ActionKind.CLICK,
-            } or (
-                replay_uploads and action.proposal.kind is ActionKind.UPLOAD
-            ):
+            } or (replay_uploads and action.proposal.kind is ActionKind.UPLOAD):
                 driver.execute(action.proposal)
 
     @staticmethod

@@ -160,8 +160,7 @@ def _multipart_fields(
     if "boundary=" not in wire_content_type.casefold():
         raise TransmissionReviewError("multipart request has no boundary")
     envelope = (
-        f"Content-Type: {wire_content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
-        + body
+        f"Content-Type: {wire_content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
     )
     try:
         message = BytesParser(policy=policy.default).parsebytes(envelope)
@@ -177,9 +176,7 @@ def _multipart_fields(
             raise TransmissionReviewError("nested multipart bodies are not supported")
         header_names = {name.casefold() for name in part.keys()}
         if not header_names <= {"content-disposition", "content-type"}:
-            raise TransmissionReviewError(
-                "multipart part contains unsupported headers"
-            )
+            raise TransmissionReviewError("multipart part contains unsupported headers")
         if part.get_content_disposition() != "form-data":
             raise TransmissionReviewError("multipart part is not form-data")
         disposition_params = {
