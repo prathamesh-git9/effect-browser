@@ -63,6 +63,15 @@ version. Answer values and source references are intentionally absent from the
 hash-chained audit payload. This storage layer is not yet wired into reactive planning:
 until verified-answer enforcement lands, use only synthetic profile facts in demos.
 
+Local file inputs are disabled unless `EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS` names one or
+more directories. Every upload action binds an absolute path and the raw-byte SHA-256;
+policy checks the allowlist and content, and the browser executor checks both again
+immediately before attaching the file. Snapshots expose only whether a file is selected,
+never its local path or filename. Every file selection requires an action-bound operator
+approval because an ATS may transmit on `change`. A completed upload is never replayed
+automatically after a browser restart; the workflow blocks rather than risking a second
+transmission.
+
 Scrapling's role and limitations are recorded in
 [docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion
 contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).

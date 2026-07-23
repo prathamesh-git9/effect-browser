@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlparse
 
 from effect_browser.domain import (
@@ -8,6 +9,7 @@ from effect_browser.domain import (
     ProposedAction,
     RiskClass,
 )
+from effect_browser.uploads import UploadGuard, UploadValidationError
 
 SENSITIVE_LABELS = {
     "password",
@@ -25,8 +27,13 @@ SENSITIVE_LABELS = {
 
 
 class ActionPolicy:
-    def __init__(self, allowed_origins: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        allowed_origins: tuple[str, ...],
+        allowed_upload_roots: tuple[Path, ...] = (),
+    ) -> None:
         self.allowed_origins = {item.rstrip("/") for item in allowed_origins}
+        self.upload_guard = UploadGuard(allowed_upload_roots)
 
     def evaluate(self, action: ProposedAction, current_url: str) -> PolicyDecision:
         target_url = action.url or current_url
@@ -59,6 +66,28 @@ class ActionPolicy:
                 risk=RiskClass.INPUT,
                 requires_approval=False,
                 reason="non-sensitive form preparation is reversible",
+            )
+        if action.kind is ActionKind.UPLOAD:
+            try:
+                self.upload_guard.validate(
+                    action.file_path or Path(),
+                    action.document_sha256 or "",
+                )
+            except UploadValidationError as exc:
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.INPUT,
+                    requires_approval=False,
+                    reason=str(exc),
+                )
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.EXTERNAL_COMMIT,
+                requires_approval=True,
+                reason=(
+                    "file selection may transmit immediately; operator approval "
+                    "binds the allowlisted content hash and current page"
+                ),
             )
         if action.kind is ActionKind.CLICK:
             if action.target_interaction == "navigation":

@@ -22,6 +22,7 @@ outside the application. The durable observation stores only hashes and URLs.
 | --- | --- |
 | `EFFECT_BROWSER_DATABASE_URL` | SQLAlchemy SQLite or PostgreSQL URL. |
 | `EFFECT_BROWSER_ALLOWED_ORIGINS` | Comma-separated exact origins the browser may use. |
+| `EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS` | Comma-separated local directories from which files may be attached; empty disables uploads. |
 | `EFFECT_BROWSER_BROWSER_HEADLESS` | Headless execution; defaults to `true`. |
 | `EFFECT_BROWSER_BROWSER_SANDBOX` | Chromium sandbox; defaults on, disabled in the sample container. |
 | `EFFECT_BROWSER_ARTIFACTS_DIRECTORY` | Trace and screenshot destination. |
@@ -65,5 +66,7 @@ converted to `outcome_unknown` on its next run.
 - Exactly-once is impossible against an arbitrary portal. The strong result requires a
   target idempotency key or a uniquely queryable business reference.
 - Generic clicks are rejected, and auto-saving forms require a workflow-specific policy.
+- File selection always requires approval and may transmit immediately. Effect Browser
+  does not replay a completed upload while rebuilding a browser after restart.
 - The MVP has no credential vault, OIDC, or built-in artifact encryption.
 - Origin checks do not replace OS/container egress isolation.

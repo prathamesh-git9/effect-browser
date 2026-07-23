@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from uuid import UUID
+from pathlib import Path
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -8,6 +9,7 @@ from sqlalchemy import text
 from effect_browser.domain import (
     ActionKind,
     ActionState,
+    BrowserAction,
     Locator,
     ProposedAction,
     TaskStatus,
@@ -261,3 +263,55 @@ def test_audit_chain_detects_head_tampering(service, store: DatabaseStore) -> No
     verification = store.verify_audit(TENANT)
     assert verification.valid is False
     assert verification.first_invalid_sequence == verification.event_count + 1
+
+
+def test_rehydration_never_replays_a_completed_upload(
+    service, monkeypatch, tmp_path: Path
+) -> None:
+    task_id = uuid4()
+    navigate = ProposedAction(
+        kind=ActionKind.NAVIGATE,
+        url=BASE_URL,
+        description="Restore safe navigation.",
+    )
+    upload = ProposedAction(
+        kind=ActionKind.UPLOAD,
+        locator=Locator(label="Résumé"),
+        file_path=(tmp_path / "resume.pdf").resolve(),
+        document_sha256="a" * 64,
+        description="Do not replay document transmission.",
+    )
+    history = [
+        BrowserAction(
+            id=uuid4(),
+            tenant_id=TENANT,
+            task_id=task_id,
+            ordinal=0,
+            proposal=navigate,
+            state=ActionState.SUCCEEDED,
+            action_sha256=navigate.action_hash(),
+            version=1,
+        ),
+        BrowserAction(
+            id=uuid4(),
+            tenant_id=TENANT,
+            task_id=task_id,
+            ordinal=1,
+            proposal=upload,
+            state=ActionState.SUCCEEDED,
+            action_sha256=upload.action_hash(),
+            version=1,
+        ),
+    ]
+    executed: list[ActionKind] = []
+
+    class RecordingDriver:
+        def execute(self, action: ProposedAction):
+            executed.append(action.kind)
+            return None
+
+    monkeypatch.setattr(service.store, "list_actions", lambda *_args: history)
+
+    service._rehydrate(TENANT, task_id, RecordingDriver(), current_ordinal=2)
+
+    assert executed == [ActionKind.NAVIGATE]

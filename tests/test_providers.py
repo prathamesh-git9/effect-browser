@@ -186,3 +186,116 @@ def test_reactive_provider_selects_one_fresh_candidate(monkeypatch) -> None:
 
     assert choice.candidate_id == "C001"
     assert choice.kind.value == "click"
+
+
+def test_remote_plan_cannot_authorize_a_local_upload(monkeypatch, tmp_path) -> None:
+    local_path = (tmp_path / "resume.pdf").resolve()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "kind": "upload",
+                                "locator": {"label": "Résumé"},
+                                "file_path": str(local_path),
+                                "document_sha256": "a" * 64,
+                                "description": "Attach a local document.",
+                            }
+                        ]
+                    }
+                )
+            },
+        )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    planner = OpenAIPlanner(
+        "test-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(
+        ProviderError, match="remote providers cannot authorize local file uploads"
+    ):
+        planner.plan(
+            PlanRequest(
+                task_id=uuid4(),
+                instruction="Apply without exposing local file authority.",
+                start_url="https://jobs.example.test",
+            )
+        )
+
+
+def test_remote_reactive_choice_cannot_authorize_a_local_upload(
+    monkeypatch, tmp_path
+) -> None:
+    local_path = (tmp_path / "resume.pdf").resolve()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body = json.loads(request.content)
+        user_content = request_body["input"][1]["content"]
+        assert str(local_path) not in user_content
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "choice": {
+                            "kind": "upload",
+                            "candidate_id": "C001",
+                            "value": None,
+                            "file_path": str(local_path),
+                            "document_sha256": "b" * 64,
+                            "url": None,
+                            "description": "Attach a local document.",
+                            "expected_outcome": None,
+                        }
+                    }
+                )
+            },
+        )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    planner = OpenAIReactivePlanner(
+        "test-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    snapshot = PageSnapshot(
+        url="https://jobs.example.test/apply",
+        title="Apply",
+        state_sha256="fresh",
+        text_excerpt="Attach your résumé.",
+        candidates=(
+            ElementCandidate(
+                id="C001",
+                tag="input",
+                role="button",
+                name="Résumé",
+                input_type="file",
+                interaction="upload",
+                locator=Locator(
+                    selector="body > input",
+                    adaptive_id="candidate-resume:0",
+                ),
+            ),
+        ),
+        captured_at=utc_now(),
+    )
+
+    with pytest.raises(
+        ProviderError, match="remote providers cannot authorize local file uploads"
+    ):
+        planner.choose(
+            StepRequest(
+                task_id=uuid4(),
+                instruction="Attach the operator-selected document.",
+                start_url=snapshot.url,
+                step_number=1,
+                effect_reference="EB-TEST",
+                previous_actions=(),
+                snapshot=snapshot,
+            )
+        )

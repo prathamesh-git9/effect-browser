@@ -75,7 +75,7 @@ def get_service() -> EffectBrowserService:
     settings = get_settings()
     return EffectBrowserService(
         get_store(),
-        ActionPolicy(settings.allowed_origins),
+        ActionPolicy(settings.allowed_origins, settings.allowed_upload_roots),
         step_planners={
             "openai-reactive": OpenAIReactivePlanner(settings.openai_model),
             "grok-reactive": GrokReactivePlanner(settings.grok_model),
@@ -116,6 +116,7 @@ def driver() -> PlaywrightDriver:
         headless=settings.browser_headless,
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
+        allowed_upload_roots=settings.allowed_upload_roots,
     )
 
 

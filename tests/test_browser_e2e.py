@@ -13,10 +13,16 @@ import uvicorn
 from effect_browser import api
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
-from effect_browser.domain import ActionState, TaskStatus
+from effect_browser.domain import (
+    ActionKind,
+    ActionState,
+    ProposedAction,
+    TaskStatus,
+)
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import DeterministicPlanner
+from effect_browser.uploads import sha256_file
 
 
 def free_port() -> int:
@@ -48,6 +54,57 @@ def wait_until_ready(base_url: str) -> None:
             time.sleep(0.05)
     detail = last_response.text if last_response is not None else "no HTTP response"
     raise RuntimeError(f"test server did not become ready: {detail}")
+
+
+@pytest.mark.e2e
+def test_real_browser_upload_is_allowlisted_hash_bound_and_path_redacted(
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "approved"
+    upload_root.mkdir()
+    document = upload_root / "synthetic-resume.txt"
+    document.write_bytes(b"synthetic resume fixture")
+    form = tmp_path / "upload-form.html"
+    form.write_text(
+        """
+        <!doctype html><title>Upload fixture</title>
+        <label for="resume">Résumé</label>
+        <input id="resume" name="resume" type="file" required>
+        """,
+        encoding="utf-8",
+    )
+    driver = PlaywrightDriver(
+        executable_path=edge_executable(),
+        headless=True,
+        artifacts_directory=tmp_path / "artifacts",
+        allowed_upload_roots=(upload_root,),
+    )
+    try:
+        driver.execute(
+            ProposedAction(
+                kind=ActionKind.NAVIGATE,
+                url=form.resolve().as_uri(),
+                description="Open the local synthetic upload fixture.",
+            )
+        )
+        candidate = driver.snapshot().candidates[0]
+        receipt = driver.execute(
+            ProposedAction(
+                kind=ActionKind.UPLOAD,
+                locator=candidate.locator,
+                file_path=document.resolve(),
+                document_sha256=sha256_file(document),
+                description="Attach the approved synthetic document.",
+            )
+        )
+        attached = driver.snapshot().candidates[0]
+    finally:
+        driver.close()
+
+    assert receipt.external_id == "local-upload"
+    assert attached.filled is True
+    assert attached.current_value is None
+    assert document.name not in attached.model_dump_json()
 
 
 @pytest.mark.e2e

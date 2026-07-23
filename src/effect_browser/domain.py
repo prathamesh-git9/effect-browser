@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +40,7 @@ class TaskStatus(StrEnum):
 class ActionKind(StrEnum):
     NAVIGATE = "navigate"
     FILL = "fill"
+    UPLOAD = "upload"
     CLICK = "click"
     SUBMIT = "submit"
     FINISH = "finish"
@@ -181,6 +183,11 @@ class ProposedAction(DomainModel):
     locator: Locator | None = None
     url: str | None = None
     value: str | None = None
+    file_path: Path | None = None
+    document_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     description: str = Field(min_length=1, max_length=500)
     effect_key: str | None = None
     expected_outcome: str | None = None
@@ -194,11 +201,25 @@ class ProposedAction(DomainModel):
     def validate_shape(self) -> ProposedAction:
         if self.kind is ActionKind.NAVIGATE and not self.url:
             raise ValueError("navigate requires url")
-        if self.kind in {ActionKind.FILL, ActionKind.CLICK, ActionKind.SUBMIT}:
+        if self.kind in {
+            ActionKind.FILL,
+            ActionKind.UPLOAD,
+            ActionKind.CLICK,
+            ActionKind.SUBMIT,
+        }:
             if self.locator is None:
                 raise ValueError(f"{self.kind.value} requires locator")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill requires value")
+        if self.kind is ActionKind.UPLOAD:
+            if self.file_path is None or self.document_sha256 is None:
+                raise ValueError("upload requires file_path and document_sha256")
+            if not self.file_path.is_absolute():
+                raise ValueError("upload file_path must be absolute")
+        elif self.file_path is not None or self.document_sha256 is not None:
+            raise ValueError(
+                "file_path and document_sha256 are valid only for upload actions"
+            )
         if self.kind is ActionKind.SUBMIT:
             if not self.effect_key or not self.expected_outcome:
                 raise ValueError("submit requires effect_key and expected_outcome")
@@ -270,6 +291,11 @@ class StepChoice(DomainModel):
     kind: ActionKind
     candidate_id: str | None = None
     value: str | None = None
+    file_path: Path | None = None
+    document_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     url: str | None = None
     description: str = Field(min_length=1, max_length=500)
     expected_outcome: str | None = None
@@ -278,15 +304,35 @@ class StepChoice(DomainModel):
     def validate_choice(self) -> StepChoice:
         if self.kind is ActionKind.NAVIGATE and not self.url:
             raise ValueError("navigate choice requires url")
-        if self.kind in {ActionKind.FILL, ActionKind.CLICK, ActionKind.SUBMIT}:
+        if self.kind in {
+            ActionKind.FILL,
+            ActionKind.UPLOAD,
+            ActionKind.CLICK,
+            ActionKind.SUBMIT,
+        }:
             if not self.candidate_id:
                 raise ValueError(f"{self.kind.value} choice requires candidate_id")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill choice requires value")
+        if self.kind is ActionKind.UPLOAD:
+            if self.file_path is None or self.document_sha256 is None:
+                raise ValueError("upload choice requires file_path and document_sha256")
+            if not self.file_path.is_absolute():
+                raise ValueError("upload choice file_path must be absolute")
+        elif self.file_path is not None or self.document_sha256 is not None:
+            raise ValueError(
+                "file_path and document_sha256 are valid only for upload choices"
+            )
         if self.kind is ActionKind.SUBMIT and not self.expected_outcome:
             raise ValueError("submit choice requires expected_outcome")
         if self.kind is ActionKind.FINISH and any(
-            (self.candidate_id, self.value, self.url)
+            (
+                self.candidate_id,
+                self.value,
+                self.file_path,
+                self.document_sha256,
+                self.url,
+            )
         ):
             raise ValueError("finish choice cannot target a candidate or URL")
         return self

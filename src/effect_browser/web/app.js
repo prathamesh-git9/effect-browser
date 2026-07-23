@@ -24,6 +24,10 @@ function short(value, size = 12) {
   return value ? `${value.slice(0, size)}...` : "-";
 }
 
+function baseName(value) {
+  return String(value ?? "").split(/[\\/]/).pop();
+}
+
 function renderOutgoingReview(review) {
   if (!review) return "";
   const fields = review.fields.length
@@ -110,18 +114,29 @@ function renderGate(action) {
   gate.className = "";
   if (!action) return;
   if (action.state === "approval_required") {
+    const isUpload = action.proposal.kind === "upload";
+    const details = isUpload
+      ? `<p><strong>Document:</strong> ${escapeHtml(baseName(action.proposal.file_path))}<br>
+        <strong>Document SHA-256:</strong>
+        <code>${escapeHtml(action.proposal.document_sha256)}</code><br>
+        <strong>Observed URL:</strong> ${escapeHtml(action.observation_url)}</p>`
+      : `<p><strong>Expected:</strong> ${escapeHtml(action.proposal.expected_outcome)}<br>
+        <strong>Effect key:</strong> ${escapeHtml(action.proposal.effect_key)}<br>
+        <strong>Observed URL:</strong> ${escapeHtml(action.observation_url)}</p>`;
     gate.className = "gate";
     gate.innerHTML = `
-      <p class="kicker">EXTERNAL COMMIT GATE</p><h3>Operator decision required</h3>
-      <p>${escapeHtml(action.proposal.description)} The approval binds this exact action
-      to the observed page state; any drift invalidates it.</p>
+      <p class="kicker">${isUpload ? "DOCUMENT TRANSMISSION GATE" : "EXTERNAL COMMIT GATE"}</p>
+      <h3>Operator decision required</h3>
+      <p>${escapeHtml(action.proposal.description)} ${isUpload
+        ? "Selecting a file may transmit it immediately on this page."
+        : "The approval binds this exact action to the observed page state; any drift invalidates it."}</p>
       <div class="hashes"><div><small>ACTION SHA-256</small><code title="${action.action_sha256}">${action.action_sha256}</code></div>
       <div><small>OBSERVATION SHA-256</small><code title="${action.observation_sha256}">${action.observation_sha256}</code></div></div>
-      <p><strong>Expected:</strong> ${escapeHtml(action.proposal.expected_outcome)}<br>
-      <strong>Effect key:</strong> ${escapeHtml(action.proposal.effect_key)}<br>
-      <strong>Observed URL:</strong> ${escapeHtml(action.observation_url)}</p>
+      ${details}
       ${renderOutgoingReview(action.proposal.outgoing_review)}
-      <div class="gate-actions"><button class="primary" id="approve">Approve exact commit</button>
+      <div class="gate-actions"><button class="primary" id="approve">${isUpload
+        ? "Approve document transmission"
+        : "Approve exact commit"}</button>
       <button class="primary danger" id="reject">Reject</button></div>`;
     $("#approve").addEventListener("click", (event) => mutate(
       event.currentTarget,
@@ -136,18 +151,27 @@ function renderGate(action) {
       }),
     ));
   } else if (["outcome_unknown", "dispatching"].includes(action.state)) {
+    const isUpload = action.proposal.kind === "upload";
+    const canReconcile = Boolean(action.proposal.reconciliation);
     gate.className = "gate unknown";
     gate.innerHTML = `
       <p class="kicker">AMBIGUOUS REMOTE OUTCOME</p><h3>Automatic retry is blocked</h3>
       <p>${escapeHtml(action.failure || "A worker disappeared at the commit boundary.")}
-      Clicking again could duplicate the effect. Query the stable business reference first.</p>
-      <p><strong>Reference:</strong> ${escapeHtml(action.proposal.effect_key)}</p>
-      <div class="gate-actions"><button class="primary" id="reconcile">Reconcile target receipt</button>
+      ${isUpload
+        ? " Reattaching the file could transmit it twice."
+        : " Clicking again could duplicate the effect. Query the stable business reference first."}</p>
+      <p><strong>${isUpload ? "Document SHA-256" : "Reference"}:</strong>
+      ${escapeHtml(isUpload ? action.proposal.document_sha256 : action.proposal.effect_key)}</p>
+      <div class="gate-actions">${canReconcile
+        ? '<button class="primary" id="reconcile">Reconcile target receipt</button>'
+        : ""}
       <button class="secondary" id="not-committed">Mark not committed</button></div>`;
-    $("#reconcile").addEventListener("click", (event) => mutate(
-      event.currentTarget,
-      () => api(`/v1/actions/${action.id}/reconcile`, { method: "POST" }),
-    ));
+    if (canReconcile) {
+      $("#reconcile").addEventListener("click", (event) => mutate(
+        event.currentTarget,
+        () => api(`/v1/actions/${action.id}/reconcile`, { method: "POST" }),
+      ));
+    }
     $("#not-committed").addEventListener("click", (event) => mutate(
       event.currentTarget,
       () => api(`/v1/actions/${action.id}/resolve`, {

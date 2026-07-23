@@ -19,6 +19,8 @@ def test_scrapling_extracts_candidate_bound_dynamic_controls(tmp_path: Path) -> 
       <button type="button">Continue</button>
       <button type="submit">Submit application</button>
       <a href="/privacy">Privacy</a>
+      <label for="resume">Résumé</label>
+      <input id="resume" name="resume" type="file" required>
       <input type="hidden" name="csrf" value="secret">
     </body></html>
     """
@@ -35,8 +37,9 @@ def test_scrapling_extracts_candidate_bound_dynamic_controls(tmp_path: Path) -> 
         "Continue",
         "Submit application",
         "Privacy",
+        "Résumé",
     ]
-    country, continue_button, submit, privacy = snapshot.candidates
+    country, continue_button, submit, privacy, resume = snapshot.candidates
     assert country.options == (" | Choose", "IE | Ireland")
     assert country.required is True
     assert country.current_value == ""
@@ -44,6 +47,9 @@ def test_scrapling_extracts_candidate_bound_dynamic_controls(tmp_path: Path) -> 
     assert submit.interaction == "commit"
     assert privacy.interaction == "navigation"
     assert privacy.href == "https://jobs.example.test/privacy"
+    assert resume.interaction == "upload"
+    assert resume.input_type == "file"
+    assert resume.current_value is None
     assert all(candidate.locator.selector for candidate in snapshot.candidates)
     assert all(candidate.locator.adaptive_id for candidate in snapshot.candidates)
 

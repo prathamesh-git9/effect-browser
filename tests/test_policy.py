@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from effect_browser.domain import (
     ActionKind,
     Locator,
@@ -8,6 +10,7 @@ from effect_browser.domain import (
     digest,
 )
 from effect_browser.policy import ActionPolicy
+from effect_browser.uploads import sha256_file
 
 from .conftest import BASE_URL
 
@@ -37,6 +40,59 @@ def test_sensitive_fill_is_rejected_by_accessible_name() -> None:
 
     assert decision.allowed is False
     assert "credential" in decision.reason
+
+
+def upload_action(path: Path, sha256: str) -> ProposedAction:
+    return ProposedAction(
+        kind=ActionKind.UPLOAD,
+        locator=Locator(label="Résumé"),
+        file_path=path,
+        document_sha256=sha256,
+        description="Attach the operator-supplied document.",
+    )
+
+
+def test_upload_requires_allowlisted_unchanged_content(tmp_path: Path) -> None:
+    upload_root = tmp_path / "approved"
+    upload_root.mkdir()
+    document = upload_root / "synthetic-resume.txt"
+    document.write_bytes(b"synthetic resume fixture")
+    action = upload_action(document.resolve(), sha256_file(document))
+
+    allowed = ActionPolicy((BASE_URL,), (upload_root,)).evaluate(
+        action,
+        f"{BASE_URL}/form",
+    )
+    document.write_bytes(b"changed after planning")
+    changed = ActionPolicy((BASE_URL,), (upload_root,)).evaluate(
+        action,
+        f"{BASE_URL}/form",
+    )
+
+    assert allowed.allowed is True
+    assert allowed.risk.value == "external_commit"
+    assert allowed.requires_approval is True
+    assert changed.allowed is False
+    assert "no longer matches" in changed.reason
+    assert document.name not in changed.reason
+
+
+def test_upload_outside_allowlist_fails_without_disclosing_path(
+    tmp_path: Path,
+) -> None:
+    upload_root = tmp_path / "approved"
+    upload_root.mkdir()
+    outside = tmp_path / "private-document.txt"
+    outside.write_bytes(b"not approved")
+
+    decision = ActionPolicy((BASE_URL,), (upload_root,)).evaluate(
+        upload_action(outside.resolve(), sha256_file(outside)),
+        f"{BASE_URL}/form",
+    )
+
+    assert decision.allowed is False
+    assert "outside" in decision.reason
+    assert outside.name not in decision.reason
 
 
 def review_for(observation_sha256: str) -> OutgoingReview:

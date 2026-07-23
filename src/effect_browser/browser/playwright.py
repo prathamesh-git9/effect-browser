@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import re
 from pathlib import Path
 from uuid import uuid4
@@ -19,6 +20,7 @@ from effect_browser.domain import (
     digest,
     utc_now,
 )
+from effect_browser.uploads import UploadGuard
 
 
 class PlaywrightDriver:
@@ -29,9 +31,11 @@ class PlaywrightDriver:
         headless: bool = True,
         sandbox: bool = True,
         artifacts_directory: Path = Path("artifacts"),
+        allowed_upload_roots: tuple[Path, ...] = (),
     ) -> None:
         artifacts_directory.mkdir(parents=True, exist_ok=True)
         self.artifacts_directory = artifacts_directory
+        self._upload_guard = UploadGuard(allowed_upload_roots)
         self.session_id = str(uuid4())
         self._playwright: Playwright = sync_playwright().start()
         options = {
@@ -61,11 +65,15 @@ class PlaywrightDriver:
         locator = self._page.locator("input, textarea, select")
         for index in range(locator.count()):
             item = locator.nth(index)
+            input_type = item.get_attribute("type")
+            value = item.input_value()
             controls.append(
                 {
                     "name": item.get_attribute("name"),
-                    "type": item.get_attribute("type"),
-                    "value": item.input_value(),
+                    "type": input_type,
+                    "value": (
+                        {"file_selected": bool(value)} if input_type == "file" else value
+                    ),
                 }
             )
         state_sha256 = digest(
@@ -109,10 +117,13 @@ class PlaywrightDriver:
             if target.count() == 1 and target.is_visible():
                 filled = False
                 current_value = None
-                if candidate.interaction == "input":
+                if candidate.interaction in {"input", "upload"}:
                     try:
-                        current_value = target.input_value()
-                        filled = bool(current_value.strip())
+                        live_value = target.input_value()
+                        filled = bool(live_value.strip())
+                        current_value = (
+                            live_value if candidate.interaction == "input" else None
+                        )
                     except PlaywrightTimeoutError:
                         filled = False
                         current_value = None
@@ -132,6 +143,21 @@ class PlaywrightDriver:
                 target.select_option(action.value or "")
             else:
                 target.fill(action.value or "")
+        elif action.kind is ActionKind.UPLOAD:
+            upload = self._upload_guard.validate(
+                action.file_path or Path(),
+                action.document_sha256 or "",
+            )
+            self._locator(action).set_input_files(
+                {
+                    "name": upload.path.name,
+                    "mimeType": (
+                        mimetypes.guess_type(upload.path.name)[0]
+                        or "application/octet-stream"
+                    ),
+                    "buffer": upload.content,
+                }
+            )
         elif action.kind in {ActionKind.CLICK, ActionKind.SUBMIT}:
             self._locator(action).click()
             wait_state = (

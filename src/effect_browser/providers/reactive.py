@@ -61,6 +61,8 @@ def bind_choice(
         raise ValueError("step planner selected a missing or disabled candidate")
     if choice.kind is ActionKind.FILL and candidate.interaction != "input":
         raise ValueError("fill choice must target an input candidate")
+    if choice.kind is ActionKind.UPLOAD and candidate.interaction != "upload":
+        raise ValueError("upload choice must target a file input candidate")
     if choice.kind is ActionKind.CLICK and candidate.interaction == "commit":
         raise ValueError("commit candidate must use submit, not click")
     if choice.kind is ActionKind.SUBMIT and candidate.interaction != "commit":
@@ -87,6 +89,11 @@ def bind_choice(
             for action in prior_actions
             if action.kind is ActionKind.FILL and action.target_name is not None
         }
+        latest_upload_by_name = {
+            action.target_name: action
+            for action in prior_actions
+            if action.kind is ActionKind.UPLOAD and action.target_name is not None
+        }
         fields = tuple(
             ReviewField(
                 candidate_id=candidate.id,
@@ -104,14 +111,22 @@ def bind_choice(
             for candidate in snapshot.candidates
             if candidate.interaction == "input" and candidate.current_value is not None
         )
+        document_sha256s = tuple(
+            source.document_sha256
+            for candidate in snapshot.candidates
+            if candidate.interaction == "upload"
+            and candidate.filled
+            and (source := latest_upload_by_name.get(candidate.name)) is not None
+            and source.document_sha256 is not None
+        )
         review_body = {
             "fields": [field.model_dump(mode="json") for field in fields],
-            "document_sha256s": [],
+            "document_sha256s": list(document_sha256s),
             "observation_sha256": snapshot.state_sha256,
         }
         outgoing_review = OutgoingReview(
             fields=fields,
-            document_sha256s=(),
+            document_sha256s=document_sha256s,
             observation_sha256=snapshot.state_sha256,
             payload_sha256=digest(review_body),
         )
@@ -119,6 +134,8 @@ def bind_choice(
         kind=choice.kind,
         locator=candidate.locator,
         value=choice.value,
+        file_path=choice.file_path,
+        document_sha256=choice.document_sha256,
         description=choice.description,
         effect_key=effect_reference if choice.kind is ActionKind.SUBMIT else None,
         expected_outcome=(

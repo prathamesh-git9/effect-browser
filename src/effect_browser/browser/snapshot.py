@@ -16,9 +16,9 @@ from effect_browser.domain import (
     utc_now,
 )
 
-ACTIONABLE_SELECTOR = (
-    "input, textarea, select, button, a[href], [role='button'], "
-    "[role='link'], [contenteditable='true']"
+ACTIONABLE_XPATH = (
+    "//input | //textarea | //select | //button | //a[@href] | "
+    "//*[@role='button'] | //*[@role='link'] | //*[@contenteditable='true']"
 )
 COMMIT_WORDS = re.compile(
     r"\b(submit|confirm|purchase|buy|order|send|publish|delete|remove|"
@@ -47,7 +47,10 @@ class ScraplingSnapshotter:
         page = self._page(html, url)
         candidates: list[ElementCandidate] = []
         semantic_counts: dict[str, int] = {}
-        for element in page.css(ACTIONABLE_SELECTOR):
+        # Scrapling's comma-separated CSS queries are grouped by selector rather
+        # than returned in DOM order. XPath union preserves the rendered order,
+        # which keeps candidate IDs stable as new control types are added.
+        for element in page.xpath(ACTIONABLE_XPATH):
             if self._excluded(element):
                 continue
             role = self._role(element)
@@ -215,6 +218,8 @@ class ScraplingSnapshotter:
         if href:
             return "navigation"
         input_type = str(element.attrib.get("type", "")).casefold()
+        if input_type == "file":
+            return "upload"
         if input_type == "submit" or COMMIT_WORDS.search(name):
             return "commit"
         if str(element.tag).casefold() in {"input", "textarea", "select"}:

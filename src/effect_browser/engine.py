@@ -292,7 +292,7 @@ class EffectBrowserService:
                             ),
                         )
             except Exception as exc:
-                if action.proposal.kind is ActionKind.SUBMIT:
+                if action.proposal.kind in {ActionKind.SUBMIT, ActionKind.UPLOAD}:
                     unknown = self.store.mark_outcome_unknown(
                         tenant_id,
                         action.id,
@@ -301,7 +301,10 @@ class EffectBrowserService:
                     return RunResult(
                         task=self.store.get_task(tenant_id, task_id),
                         next_action=unknown,
-                        message="submit may have committed; automatic retry is disabled",
+                        message=(
+                            "external transmission may have occurred; automatic retry "
+                            "is disabled"
+                        ),
                     )
                 failed = self.store.fail_action(
                     tenant_id,
