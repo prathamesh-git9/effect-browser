@@ -10,6 +10,7 @@ from effect_browser.domain import (
     digest,
 )
 from effect_browser.policy import ActionPolicy
+from effect_browser.transmission import fingerprint_request
 from effect_browser.uploads import sha256_file
 
 from .conftest import BASE_URL
@@ -95,16 +96,26 @@ def test_upload_outside_allowlist_fails_without_disclosing_path(
     assert outside.name not in decision.reason
 
 
-def review_for(observation_sha256: str) -> OutgoingReview:
+def review_for(
+    observation_sha256: str,
+    request_url: str = f"{BASE_URL}/applications",
+) -> OutgoingReview:
     body = {
         "fields": [],
         "document_sha256s": [],
         "observation_sha256": observation_sha256,
     }
-    return OutgoingReview(
+    base = OutgoingReview(
         observation_sha256=observation_sha256,
         payload_sha256=digest(body),
     )
+    request = fingerprint_request(
+        method="POST",
+        url=request_url,
+        headers={"content-type": "application/json"},
+        body=b"{}",
+    )
+    return base.bind_requests((request,))
 
 
 def reactive_submit(review: OutgoingReview | None) -> ProposedAction:
@@ -147,3 +158,18 @@ def test_bound_reactive_submit_still_requires_human_approval() -> None:
 
     assert decision.allowed is True
     assert decision.requires_approval is True
+
+
+def test_reviewed_submit_cannot_write_to_a_different_origin() -> None:
+    decision = ActionPolicy((BASE_URL,)).evaluate(
+        reactive_submit(
+            review_for(
+                "fresh-observation",
+                "https://collector.example.test/applications",
+            )
+        ),
+        f"{BASE_URL}/form",
+    )
+
+    assert decision.allowed is False
+    assert "origin is not allowed" in decision.reason

@@ -8,7 +8,9 @@ from effect_browser.domain import (
     ActionState,
     BrowserReceipt,
     PlanRequest,
+    PolicyDecision,
     Resolution,
+    RiskClass,
     RunResult,
     StepRequest,
     Task,
@@ -20,6 +22,7 @@ from effect_browser.policy import ActionPolicy
 from effect_browser.providers.base import Planner, StepPlanner
 from effect_browser.providers.reactive import bind_choice
 from effect_browser.store import ConflictError, DatabaseStore
+from effect_browser.transmission import TransmissionBlocked
 
 
 class SimulatedProcessCrash(BaseException):
@@ -35,6 +38,12 @@ class CrashAfterCommitDriver:
 
     def observe(self):
         return self.inner.observe()
+
+    def snapshot(self):
+        return self.inner.snapshot()
+
+    def preview_submit(self, action, observation_sha256):
+        return self.inner.preview_submit(action, observation_sha256)
 
     def execute(self, action):
         receipt = self.inner.execute(action)
@@ -218,7 +227,38 @@ class EffectBrowserService:
                         }
                     )
                 else:
-                    decision = self.policy.evaluate(action.proposal, observation.url)
+                    if action.proposal.kind is ActionKind.SUBMIT:
+                        try:
+                            review = driver.preview_submit(
+                                action.proposal,
+                                observation.state_sha256,
+                            )
+                            action = self.store.bind_outgoing_review(
+                                tenant_id=tenant_id,
+                                action_id=action.id,
+                                expected_version=action.version,
+                                review=review,
+                            )
+                        except ValueError as exc:
+                            decision = PolicyDecision(
+                                allowed=False,
+                                risk=RiskClass.EXTERNAL_COMMIT,
+                                requires_approval=False,
+                                reason=(
+                                    "exact outgoing request review failed: "
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            )
+                        else:
+                            decision = self.policy.evaluate(
+                                action.proposal,
+                                observation.url,
+                            )
+                    else:
+                        decision = self.policy.evaluate(
+                            action.proposal,
+                            observation.url,
+                        )
                 action = self.store.prepare_action(
                     tenant_id,
                     action.id,
@@ -291,6 +331,20 @@ class EffectBrowserService:
                                 "found"
                             ),
                         )
+            except TransmissionBlocked as exc:
+                failed = self.store.fail_action(
+                    tenant_id,
+                    action.id,
+                    f"outgoing request blocked before transmission: {exc}",
+                )
+                return RunResult(
+                    task=self.store.get_task(tenant_id, task_id),
+                    next_action=failed,
+                    message=(
+                        "outgoing request changed after approval and was blocked "
+                        "before transmission"
+                    ),
+                )
             except Exception as exc:
                 if action.proposal.kind in {ActionKind.SUBMIT, ActionKind.UPLOAD}:
                     unknown = self.store.mark_outcome_unknown(

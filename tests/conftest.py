@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,7 @@ from effect_browser.domain import (
     ActionKind,
     BrowserReceipt,
     Observation,
+    OutgoingReview,
     ProposedAction,
     ReconciliationSpec,
     digest,
@@ -19,6 +21,7 @@ from effect_browser.domain import (
 from effect_browser.engine import EffectBrowserService
 from effect_browser.policy import ActionPolicy
 from effect_browser.store import DatabaseStore
+from effect_browser.transmission import fingerprint_request
 
 TENANT = UUID("10000000-0000-0000-0000-000000000001")
 BASE_URL = "http://127.0.0.1:8765"
@@ -51,6 +54,38 @@ class FakeDriver:
             ),
             captured_at=utc_now(),
         )
+
+    def preview_submit(
+        self,
+        action: ProposedAction,
+        observation_sha256: str,
+    ) -> OutgoingReview:
+        base = action.outgoing_review
+        if base is None:
+            body = {
+                "fields": [],
+                "document_sha256s": [],
+                "observation_sha256": observation_sha256,
+            }
+            base = OutgoingReview(
+                observation_sha256=observation_sha256,
+                payload_sha256=digest(body),
+            )
+        request_body = json.dumps(
+            {
+                "effect_key": action.effect_key,
+                "values": self.values,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        reviewed = fingerprint_request(
+            method="POST",
+            url=f"{BASE_URL}/synthetic-commit",
+            headers={"content-type": "application/json"},
+            body=request_body,
+        )
+        return base.bind_requests((reviewed,))
 
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         if action.kind is ActionKind.NAVIGATE:

@@ -158,24 +158,94 @@ class ReviewField(DomainModel):
     source_action_sha256: str | None = None
 
 
+class ReviewedRequestField(DomainModel):
+    name: str = Field(min_length=1, max_length=500)
+    value: str | None = Field(default=None, max_length=10_000)
+    value_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    redacted: bool = False
+
+    @model_validator(mode="after")
+    def verify_value_hash(self) -> ReviewedRequestField:
+        if self.redacted:
+            if self.value is not None:
+                raise ValueError("redacted request fields cannot retain their value")
+        elif self.value is None:
+            raise ValueError("visible request fields require a value")
+        elif digest({"value": self.value}) != self.value_sha256:
+            raise ValueError("request field value does not match its SHA-256")
+        return self
+
+
+class ReviewedRequest(DomainModel):
+    method: str = Field(min_length=1, max_length=20)
+    target: str = Field(min_length=1, max_length=2_000)
+    url_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_type: str = Field(max_length=500)
+    body_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fields: tuple[ReviewedRequestField, ...] = ()
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def fingerprint_body(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "target": self.target,
+            "url_sha256": self.url_sha256,
+            "content_type": self.content_type,
+            "body_sha256": self.body_sha256,
+            "fields": [field.model_dump(mode="json") for field in self.fields],
+        }
+
+    @model_validator(mode="after")
+    def verify_request_hash(self) -> ReviewedRequest:
+        if digest(self.fingerprint_body()) != self.request_sha256:
+            raise ValueError("reviewed request does not match its SHA-256")
+        return self
+
+
 class OutgoingReview(DomainModel):
     fields: tuple[ReviewField, ...] = ()
     document_sha256s: tuple[str, ...] = ()
+    requests: tuple[ReviewedRequest, ...] = ()
     observation_sha256: str
     payload_sha256: str
 
+    def payload_body(self) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "fields": [field.model_dump(mode="json") for field in self.fields],
+            "document_sha256s": list(self.document_sha256s),
+            "observation_sha256": self.observation_sha256,
+        }
+        # Keep reviews created before request interception verifiable.
+        if self.requests:
+            body["requests"] = [
+                request.model_dump(mode="json") for request in self.requests
+            ]
+        return body
+
     @model_validator(mode="after")
     def verify_payload_hash(self) -> OutgoingReview:
-        expected = digest(
-            {
-                "fields": [field.model_dump(mode="json") for field in self.fields],
-                "document_sha256s": list(self.document_sha256s),
-                "observation_sha256": self.observation_sha256,
-            }
-        )
+        expected = digest(self.payload_body())
         if self.payload_sha256 != expected:
             raise ValueError("outgoing review payload hash does not match its contents")
         return self
+
+    def bind_requests(
+        self,
+        requests: tuple[ReviewedRequest, ...],
+    ) -> OutgoingReview:
+        body: dict[str, Any] = {
+            "fields": [field.model_dump(mode="json") for field in self.fields],
+            "document_sha256s": list(self.document_sha256s),
+            "requests": [request.model_dump(mode="json") for request in requests],
+            "observation_sha256": self.observation_sha256,
+        }
+        return OutgoingReview(
+            fields=self.fields,
+            document_sha256s=self.document_sha256s,
+            requests=requests,
+            observation_sha256=self.observation_sha256,
+            payload_sha256=digest(body),
+        )
 
 
 class ProposedAction(DomainModel):

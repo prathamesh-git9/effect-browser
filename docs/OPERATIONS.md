@@ -69,5 +69,11 @@ converted to `outcome_unknown` on its next run.
 - Generic clicks are rejected, and auto-saving forms require a workflow-specific policy.
 - File selection always requires approval and may transmit immediately. Effect Browser
   does not replay a completed upload while rebuilding a browser after restart.
+- Submit preview blocks service workers and WebSockets, intercepts the click-generated
+  request, and aborts it before network transmission. The approved request is allowed
+  only when its regenerated URL/body fingerprint is identical.
+- Exact request review currently accepts one JSON or URL-encoded request no larger than
+  12 MiB. Multipart, streaming, and multi-write submits are blocked rather than shown as
+  reviewed.
 - The MVP has no credential vault, OIDC, or built-in artifact encryption.
 - Origin checks do not replace OS/container egress isolation.

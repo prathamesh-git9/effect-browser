@@ -72,6 +72,14 @@ approval because an ATS may transmit on `change`. A completed upload is never re
 automatically after a browser restart; the workflow blocks rather than risking a second
 transmission.
 
+Submit approval is based on an abort-first network preview, not only the visible DOM.
+Effect Browser routes the click-generated request, records its method, redacted target,
+raw URL/body hashes, content type, and parsed outgoing fields, then aborts it before the
+network. Approval binds that request fingerprint, the action, and the page state. On
+dispatch, a changed first request is blocked before transmission. The current exact
+preview supports one JSON or URL-encoded request up to 12 MiB; multipart file submits
+and multi-write submit flows still fail closed.
+
 Scrapling's role and limitations are recorded in
 [docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion
 contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).

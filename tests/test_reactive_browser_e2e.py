@@ -104,6 +104,20 @@ def prepare_reactive_task(base_url: str, start_url: str | None = None):
     assert submit.proposal.reconciliation is not None
     assert submit.proposal.outgoing_review is not None
     assert len(submit.proposal.outgoing_review.fields) == 8
+    assert len(submit.proposal.outgoing_review.requests) == 1
+    outgoing = submit.proposal.outgoing_review.requests[0]
+    outgoing_fields = {field.name: field.value for field in outgoing.fields}
+    assert outgoing.method == "POST"
+    assert outgoing.target == f"{base_url}/demo-jobs/api/applications"
+    assert outgoing_fields["job_slug"] == "platform-reliability-engineer"
+    assert outgoing_fields["years_python"] == "6"
+    assert (
+        httpx.get(
+            f"{base_url}/demo-jobs/api/applications",
+            timeout=5,
+        ).json()
+        == []
+    )
     service.store.approve_action(
         tenant_id=settings.default_tenant_id,
         action_id=submit.id,
@@ -196,6 +210,46 @@ def test_reactive_agent_never_accepts_fake_application_success(
             )
             is None
         )
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_changed_javascript_payload_is_blocked_before_transmission(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    base_url, server, thread = start_harness(tmp_path, monkeypatch)
+    try:
+        service, task, _submit = prepare_reactive_task(
+            base_url,
+            (
+                f"{base_url}/demo-jobs/jobs/"
+                "platform-reliability-engineer/apply?mode=payload_drift"
+            ),
+        )
+        runner = browser()
+        try:
+            result = service.run(
+                tenant_id=get_settings().default_tenant_id,
+                task_id=task.id,
+                driver=runner,
+            )
+        finally:
+            runner.close()
+        ledger = httpx.get(
+            f"{base_url}/demo-jobs/api/applications",
+            timeout=5,
+        ).json()
+
+        assert result.task.status.value == "failed"
+        assert result.next_action is not None
+        assert result.next_action.state is ActionState.FAILED
+        assert "blocked before transmission" in result.message
+        assert ledger == []
     finally:
         server.should_exit = True
         thread.join(timeout=10)

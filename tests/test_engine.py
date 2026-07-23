@@ -23,6 +23,7 @@ from effect_browser.domain import (
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
+from effect_browser.transmission import fingerprint_request
 
 from .conftest import BASE_URL, TENANT, FakeDriver, RemoteSystem
 
@@ -175,9 +176,19 @@ def test_payload_approval_is_persisted_and_rechecked_before_dispatch(service) ->
         "document_sha256s": [],
         "observation_sha256": observation_sha256,
     }
-    review = OutgoingReview(
+    base_review = OutgoingReview(
         observation_sha256=observation_sha256,
         payload_sha256=digest(review_body),
+    )
+    review = base_review.bind_requests(
+        (
+            fingerprint_request(
+                method="POST",
+                url=f"{BASE_URL}/applications",
+                headers={"content-type": "application/json"},
+                body=b"{}",
+            ),
+        )
     )
 
     class ReviewedSubmitPlanner:

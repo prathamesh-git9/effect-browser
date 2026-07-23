@@ -43,7 +43,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] Résumé bytes stay outside prompts and logs; only approved local paths reach
       the browser executor.
 - [ ] A final review displays every outgoing field and document hash before submit.
-- [ ] Approval binds the final action, outgoing payload hash, and page-state hash.
+- [x] Approval binds the final action, outgoing payload hash, and page-state hash.
 - [ ] The dynamic ATS harness includes hydration, conditional fields, file upload,
       an iframe or multi-step transition, duplicate protection, and fake success.
 - [ ] A generic reactive planner completes the harness without a site-specific plan.
@@ -63,7 +63,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] R4: Candidate-bound click policy and selector drift recovery.
 - [x] R5: Factual profile and answer provenance.
 - [x] R6: File upload with path allowlist and content hash.
-- [ ] R7: Final outgoing-payload review gate.
+- [x] R7: Final outgoing-payload review gate.
 - [ ] R8: Multi-page adversarial ATS harness.
 - [ ] R9: Generic deterministic reactive-agent tests.
 - [ ] R10: Live OpenAI and Grok evaluations.

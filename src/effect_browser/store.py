@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from effect_browser.domain import (
+    ActionKind,
     ActionState,
     AnswerSensitivity,
     AnswerSource,
@@ -38,6 +39,7 @@ from effect_browser.domain import (
     BrowserReceipt,
     FactualProfile,
     Observation,
+    OutgoingReview,
     PolicyDecision,
     ProfileAnswer,
     ProposedAction,
@@ -732,6 +734,48 @@ class DatabaseStore:
             session.flush()
             return self._action(row)
 
+    def bind_outgoing_review(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        review: OutgoingReview,
+    ) -> BrowserAction:
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed while binding review")
+            if ActionState(row.state) not in {
+                ActionState.PENDING,
+                ActionState.INVALIDATED,
+            }:
+                raise ConflictError("only an unprepared action can bind a review")
+            proposal = ProposedAction.model_validate(row.proposal)
+            if proposal.kind is not ActionKind.SUBMIT:
+                raise ConflictError("only submit actions can bind an outgoing review")
+            updated = proposal.model_copy(update={"outgoing_review": review})
+            row.proposal = updated.model_dump(mode="json")
+            row.action_sha256 = updated.action_hash()
+            row.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.outgoing_review_bound",
+                payload={
+                    "action_sha256": row.action_sha256,
+                    "observation_sha256": review.observation_sha256,
+                    "payload_sha256": review.payload_sha256,
+                    "request_sha256s": [
+                        request.request_sha256 for request in review.requests
+                    ],
+                },
+            )
+            session.flush()
+            return self._action(row)
+
     def prepare_action(
         self,
         tenant_id: UUID,
@@ -935,6 +979,11 @@ class DatabaseStore:
             proposal = ProposedAction.model_validate(row.proposal)
             if proposal.action_hash() != row.action_sha256:
                 raise ConflictError("stored action no longer matches its bound hash")
+            if proposal.kind is ActionKind.SUBMIT and (
+                proposal.outgoing_review is None
+                or len(proposal.outgoing_review.requests) != 1
+            ):
+                raise ConflictError("submit lacks one exact approved outgoing request")
             if RiskClass(row.risk) is RiskClass.EXTERNAL_COMMIT:
                 approval = session.scalar(
                     select(ApprovalRow)

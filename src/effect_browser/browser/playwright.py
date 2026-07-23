@@ -3,9 +3,18 @@ from __future__ import annotations
 import mimetypes
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
-from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    Playwright,
+    Route,
+    sync_playwright,
+)
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator as PWLocator
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -14,11 +23,17 @@ from effect_browser.domain import (
     ActionKind,
     BrowserReceipt,
     Observation,
+    OutgoingReview,
     PageSnapshot,
     ProposedAction,
     ReconciliationSpec,
     digest,
     utc_now,
+)
+from effect_browser.transmission import (
+    TransmissionBlocked,
+    TransmissionReviewError,
+    fingerprint_request,
 )
 from effect_browser.uploads import UploadGuard
 
@@ -55,8 +70,10 @@ class PlaywrightDriver:
             self._playwright.stop()
             raise
         self._context: BrowserContext = self._browser.new_context(
-            viewport={"width": 1440, "height": 900}
+            viewport={"width": 1440, "height": 900},
+            service_workers="block",
         )
+        self._context.route_web_socket("**/*", lambda socket: socket.close())
         self._context.tracing.start(screenshots=True, snapshots=True)
         self._page: Page = self._context.new_page()
         self._snapshotter = ScraplingSnapshotter(
@@ -141,6 +158,66 @@ class PlaywrightDriver:
                 )
         return snapshot.model_copy(update={"candidates": tuple(visible)})
 
+    def preview_submit(
+        self,
+        action: ProposedAction,
+        observation_sha256: str,
+    ) -> OutgoingReview:
+        if action.kind is not ActionKind.SUBMIT:
+            raise ValueError("only submit actions have an outgoing request preview")
+        base_review = action.outgoing_review
+        if base_review is None:
+            body = {
+                "fields": [],
+                "document_sha256s": [],
+                "observation_sha256": observation_sha256,
+            }
+            base_review = OutgoingReview(
+                observation_sha256=observation_sha256,
+                payload_sha256=digest(body),
+            )
+        if base_review.observation_sha256 != observation_sha256:
+            raise TransmissionReviewError(
+                "outgoing review does not match the previewed page state"
+            )
+        captured = []
+        failures: list[str] = []
+
+        def abort_and_capture(route: Route) -> None:
+            try:
+                captured.append(
+                    fingerprint_request(
+                        method=route.request.method,
+                        url=route.request.url,
+                        headers=route.request.headers,
+                        body=route.request.post_data_buffer,
+                    )
+                )
+            except (TransmissionReviewError, ValueError) as exc:
+                failures.append(str(exc))
+            route.abort("blockedbyclient")
+
+        self._context.route("**/*", abort_and_capture)
+        try:
+            try:
+                self._locator(action).click(timeout=5_000)
+                self._page.wait_for_timeout(350)
+            except PlaywrightError:
+                # Aborting a native form navigation is expected. Validation below
+                # still requires one fully captured request.
+                pass
+        finally:
+            self._context.unroute("**/*", handler=abort_and_capture)
+
+        if failures:
+            raise TransmissionReviewError(failures[0])
+        if len(captured) != 1:
+            raise TransmissionReviewError(
+                "exact review requires one outgoing request; "
+                f"the submit produced {len(captured)}"
+            )
+        return base_review.bind_requests(tuple(captured))
+
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         if action.kind is ActionKind.NAVIGATE:
             self._page.goto(action.url or "", wait_until="domcontentloaded")
@@ -165,6 +242,12 @@ class PlaywrightDriver:
                     "buffer": upload.content,
                 }
             )
+        elif (
+            action.kind is ActionKind.SUBMIT
+            and action.outgoing_review is not None
+            and action.outgoing_review.requests
+        ):
+            self._execute_reviewed_submit(action)
         elif action.kind in {ActionKind.CLICK, ActionKind.SUBMIT}:
             self._locator(action).click()
             wait_state = (
@@ -174,6 +257,73 @@ class PlaywrightDriver:
         else:
             raise ValueError(f"unsupported browser action: {action.kind.value}")
         return self._receipt(action.effect_key or f"local-{action.kind.value}")
+
+    def _execute_reviewed_submit(self, action: ProposedAction) -> None:
+        review = action.outgoing_review
+        if review is None or len(review.requests) != 1:
+            raise TransmissionReviewError(
+                "reviewed submit requires exactly one approved request"
+            )
+        expected = review.requests[0]
+        sent = False
+        mismatch: list[str] = []
+        unexpected_requests: list[str] = []
+
+        def compare_and_dispatch(route: Route) -> None:
+            nonlocal sent
+            if sent:
+                method = route.request.method.upper()
+                if method in {"GET", "HEAD", "OPTIONS"} and _origin(
+                    route.request.url
+                ) == _origin(expected.target):
+                    route.continue_()
+                else:
+                    unexpected_requests.append(method)
+                    route.abort("blockedbyclient")
+                return
+            try:
+                actual = fingerprint_request(
+                    method=route.request.method,
+                    url=route.request.url,
+                    headers=route.request.headers,
+                    body=route.request.post_data_buffer,
+                )
+            except (TransmissionReviewError, ValueError) as exc:
+                mismatch.append(str(exc))
+                route.abort("blockedbyclient")
+                return
+            if actual.request_sha256 != expected.request_sha256:
+                mismatch.append(
+                    "outgoing request changed after approval; transmission blocked"
+                )
+                route.abort("blockedbyclient")
+                return
+            sent = True
+            route.continue_()
+
+        self._context.route("**/*", compare_and_dispatch)
+        click_error: PlaywrightError | None = None
+        try:
+            try:
+                self._locator(action).click(timeout=10_000)
+                self._page.wait_for_load_state("networkidle", timeout=10_000)
+            except PlaywrightError as exc:
+                click_error = exc
+        finally:
+            self._context.unroute("**/*", handler=compare_and_dispatch)
+
+        if mismatch or not sent:
+            raise TransmissionBlocked(
+                mismatch[0]
+                if mismatch
+                else "approved outgoing request was not produced; nothing was sent"
+            )
+        if unexpected_requests:
+            raise TransmissionReviewError(
+                "an additional unapproved request followed the approved request"
+            )
+        if click_error is not None:
+            raise click_error
 
     def reconcile(self, spec: ReconciliationSpec) -> BrowserReceipt | None:
         self._page.goto(spec.url, wait_until="domcontentloaded")
@@ -257,3 +407,8 @@ class PlaywrightDriver:
 
 def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _origin(url: str) -> str:
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.netloc}".casefold()

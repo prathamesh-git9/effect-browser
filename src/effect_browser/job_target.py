@@ -68,6 +68,7 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
         const root = document.querySelector('#form-root');
         const result = document.querySelector('#result');
         const mode = new URLSearchParams(location.search).get('mode') || 'real';
+        const clientNonce = mode === 'payload_drift' ? crypto.randomUUID() : null;
         async function hydrate() {{
           const response = await fetch('/demo-jobs/api/forms/{JOB_SLUG}');
           if (!response.ok) {{ result.textContent = 'Form failed to load'; return; }}
@@ -125,6 +126,7 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
             payload.job_slug = '{JOB_SLUG}';
             payload.years_python = Number(payload.years_python);
             payload.mode = mode;
+            if (clientNonce) payload.client_nonce = clientNonce;
             const submitted = await fetch('/demo-jobs/api/applications', {{
               method: 'POST',
               headers: {{'Content-Type': 'application/json'}},

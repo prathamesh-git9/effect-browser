@@ -114,15 +114,18 @@ class ActionPolicy:
                 ),
             )
         if action.kind is ActionKind.SUBMIT:
-            if action.planned_from_sha256 and action.outgoing_review is None:
+            if (
+                action.outgoing_review is None
+                or len(action.outgoing_review.requests) != 1
+            ):
                 return PolicyDecision(
                     allowed=False,
                     risk=RiskClass.EXTERNAL_COMMIT,
                     requires_approval=False,
-                    reason="reactive submit is missing its outgoing payload review",
+                    reason="submit is missing one exact outgoing request review",
                 )
             if (
-                action.outgoing_review
+                action.planned_from_sha256
                 and action.outgoing_review.observation_sha256
                 != action.planned_from_sha256
             ):
@@ -131,6 +134,17 @@ class ActionPolicy:
                     risk=RiskClass.EXTERNAL_COMMIT,
                     requires_approval=False,
                     reason="outgoing payload review is not bound to the planned page",
+                )
+            request = action.outgoing_review.requests[0]
+            if not self._origin_allowed(request.target):
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=False,
+                    reason=(
+                        "outgoing request origin is not allowed: "
+                        f"{self._origin(request.target)}"
+                    ),
                 )
             return PolicyDecision(
                 allowed=True,

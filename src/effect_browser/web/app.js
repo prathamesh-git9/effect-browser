@@ -30,6 +30,7 @@ function baseName(value) {
 
 function renderOutgoingReview(review) {
   if (!review) return "";
+  const requests = review.requests ?? [];
   const fields = review.fields.length
     ? `<table class="review-table"><thead><tr><th>Observed field</th><th>Live value</th></tr></thead>
       <tbody>${review.fields.map((field) => `<tr><td>${escapeHtml(field.label)}</td>
@@ -39,7 +40,28 @@ function renderOutgoingReview(review) {
     ? `<p><strong>Document SHA-256:</strong><br>${review.document_sha256s
       .map((value) => `<code>${escapeHtml(value)}</code>`).join("<br>")}</p>`
     : "";
-  return `<section class="outgoing-review"><p class="kicker">OBSERVED LIVE FORM VALUES</p>
+  const network = requests.map((request) => {
+    const requestFields = request.fields.length
+      ? `<table class="review-table"><thead><tr><th>Outgoing field</th><th>Exact value</th></tr></thead>
+        <tbody>${request.fields.map((field) => `<tr><td>${escapeHtml(field.name)}</td>
+        <td>${field.redacted
+          ? `<em>redacted</em> · SHA-256 ${escapeHtml(short(field.value_sha256))}`
+          : escapeHtml(field.value)}</td></tr>`).join("")}</tbody></table>`
+      : '<p class="empty">This request has no query or body fields.</p>';
+    return `<article><p><strong>${escapeHtml(request.method)}
+      ${escapeHtml(request.target)}</strong><br>
+      Content-Type: ${escapeHtml(request.content_type || "none")}</p>
+      ${requestFields}
+      <p><strong>Raw body SHA-256:</strong><br>
+      <code>${escapeHtml(request.body_sha256)}</code><br>
+      <strong>Request fingerprint SHA-256:</strong><br>
+      <code>${escapeHtml(request.request_sha256)}</code></p></article>`;
+  }).join("");
+  const kicker = requests.length
+    ? "ABORTED NETWORK PREVIEW · NOTHING SENT"
+    : "OBSERVED LIVE FORM VALUES";
+  return `<section class="outgoing-review"><p class="kicker">${kicker}</p>
+    ${network}
     ${fields}${documents}
     <p><strong>Observed DOM SHA-256:</strong><br>
     <code title="${escapeHtml(review.observation_sha256)}">${escapeHtml(review.observation_sha256)}</code></p>
