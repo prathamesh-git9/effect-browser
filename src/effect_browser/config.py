@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     grok_model: str = "grok-4.5"
     browser_executable: str | None = None
     browser_headless: bool = True
+    browser_sandbox: bool = True
     artifacts_directory: Path = Path("artifacts")
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000001")
     default_actor_id: str = "local-operator"

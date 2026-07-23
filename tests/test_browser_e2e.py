@@ -79,6 +79,7 @@ def test_real_browser_crash_reconciles_one_order(tmp_path: Path, monkeypatch) ->
         return PlaywrightDriver(
             executable_path=executable,
             headless=True,
+            sandbox=settings.browser_sandbox,
             artifacts_directory=settings.artifacts_directory,
         )
 

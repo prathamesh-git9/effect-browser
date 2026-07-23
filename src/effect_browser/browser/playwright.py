@@ -24,6 +24,7 @@ class PlaywrightDriver:
         *,
         executable_path: str | None = None,
         headless: bool = True,
+        sandbox: bool = True,
         artifacts_directory: Path = Path("artifacts"),
     ) -> None:
         artifacts_directory.mkdir(parents=True, exist_ok=True)
@@ -32,7 +33,7 @@ class PlaywrightDriver:
         self._playwright: Playwright = sync_playwright().start()
         options = {
             "headless": headless,
-            "chromium_sandbox": True,
+            "chromium_sandbox": sandbox,
             "env": {},
             "args": ["--disable-extensions", "--disable-file-system"],
         }

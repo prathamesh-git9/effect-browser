@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      EFFECT_BROWSER_BROWSER_SANDBOX: "false"
     strategy:
       matrix:
         python-version: ["3.11", "3.13"]

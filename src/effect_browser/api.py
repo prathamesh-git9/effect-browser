@@ -85,6 +85,7 @@ def driver() -> PlaywrightDriver:
     return PlaywrightDriver(
         executable_path=settings.browser_executable,
         headless=settings.browser_headless,
+        sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
     )
 

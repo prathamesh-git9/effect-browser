@@ -3,7 +3,8 @@ FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     EFFECT_BROWSER_DATABASE_URL=sqlite:////data/effect-browser.db \
-    EFFECT_BROWSER_BROWSER_HEADLESS=true
+    EFFECT_BROWSER_BROWSER_HEADLESS=true \
+    EFFECT_BROWSER_BROWSER_SANDBOX=false
 
 WORKDIR /app
 RUN groupadd --system app && useradd --system --gid app app \

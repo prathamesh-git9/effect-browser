@@ -23,11 +23,14 @@ outside the application. The durable observation stores only hashes and URLs.
 | `EFFECT_BROWSER_DATABASE_URL` | SQLAlchemy SQLite or PostgreSQL URL. |
 | `EFFECT_BROWSER_ALLOWED_ORIGINS` | Comma-separated exact origins the browser may use. |
 | `EFFECT_BROWSER_BROWSER_HEADLESS` | Headless execution; defaults to `true`. |
+| `EFFECT_BROWSER_BROWSER_SANDBOX` | Chromium sandbox; defaults on, disabled in the sample container. |
 | `EFFECT_BROWSER_ARTIFACTS_DIRECTORY` | Trace and screenshot destination. |
 | `OPENAI_API_KEY` / `XAI_API_KEY` | Needed only for the matching planner. |
 
 An application allow list is not a network sandbox. Enforce outbound network policy at
-the container or host layer as well.
+the container or host layer as well. The sample container disables Chromium's sandbox
+because typical Docker runtimes block its user namespace; compensate with a non-root
+container, seccomp/AppArmor, dropped capabilities, and isolated egress.
 
 ## Health and telemetry
 
