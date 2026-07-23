@@ -57,6 +57,12 @@ page, uses Scrapling to produce candidate-bound controls, asks the provider for 
 action, executes it through deterministic policy, and observes again. The legacy
 `openai` and `grok` providers remain only as explicit one-shot baselines.
 
+Factual profiles are tenant-scoped durable records at `/v1/profiles`. Each answer keeps
+its source, sensitivity class, user-verification state, verifier, and optimistic
+version. Answer values and source references are intentionally absent from the
+hash-chained audit payload. This storage layer is not yet wired into reactive planning:
+until verified-answer enforcement lands, use only synthetic profile facts in demos.
+
 Scrapling's role and limitations are recorded in
 [docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion
 contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).

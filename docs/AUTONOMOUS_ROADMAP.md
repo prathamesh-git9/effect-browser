@@ -37,7 +37,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] Links, reversible controls, ambiguous clicks, and commits receive different
       deterministic risk treatment.
 - [ ] The engine supports navigation, click, fill, select, file upload, and submit.
-- [ ] A factual profile stores answer value, source, sensitivity, and user
+- [x] A factual profile stores answer value, source, sensitivity, and user
       verification state.
 - [ ] Missing or unverified consequential answers stop the workflow.
 - [ ] Résumé bytes stay outside prompts and logs; only approved local paths reach
@@ -61,7 +61,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] R2: Single-step provider contract and provider implementations.
 - [x] R3: Durable dynamic action append and reactive engine loop.
 - [x] R4: Candidate-bound click policy and selector drift recovery.
-- [ ] R5: Factual profile and answer provenance.
+- [x] R5: Factual profile and answer provenance.
 - [ ] R6: File upload with path allowlist and content hash.
 - [ ] R7: Final outgoing-payload review gate.
 - [ ] R8: Multi-page adversarial ATS harness.
