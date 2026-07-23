@@ -49,7 +49,6 @@ try {
         "--ephemeral",
         "--json",
         "--sandbox", "workspace-write",
-        "--model", "gpt-5.6",
         "--cd", $resolvedWorktree,
         "--output-last-message", $lastMessage,
         $prompt
