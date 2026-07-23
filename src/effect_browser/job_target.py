@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from html import escape
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, field_validator
+from starlette.datastructures import UploadFile
 
 from effect_browser.store import DatabaseStore
 
@@ -35,6 +37,7 @@ class JobApplicationBody(BaseModel):
 
 def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRouter:
     router = APIRouter()
+    auto_upload_attempts = 0
 
     @router.get("/demo-jobs", response_class=HTMLResponse)
     def jobs() -> str:
@@ -79,6 +82,7 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
               data-effect-reconciliation-text=
                 "Verified application {{effect_key}}"
               data-effect-receipt-test-id="job-application-receipt">
+              <section id="identity-step">
               <label for="full-name">Full name</label>
               <input id="full-name" name="full_name" required>
               <label for="email">Email</label>
@@ -105,38 +109,64 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
               <label for="resume-summary">Resume summary</label>
               <textarea id="resume-summary" name="resume_summary" rows="4"
                 minlength="40" required></textarea>
+              <a id="continue-application" href="#review-step">
+                Continue to document and review
+              </a>
+              </section>
+              <section id="review-step" hidden>
               <label for="cover-note">Why this role?</label>
               <textarea id="cover-note" name="cover_note" rows="4"
                 minlength="20" required></textarea>
+              <label for="resume">Résumé document</label>
+              <input id="resume" name="resume" type="file"
+                accept=".pdf,.txt,application/pdf,text/plain" required>
               <label for="reference">Application reference</label>
               <input id="reference" name="reference" required>
               <button type="submit">Submit application</button>
+              </section>
             </form>`;
           const form = document.querySelector('#application-form');
           const country = document.querySelector('#country');
           const authorization = document.querySelector('#authorization-wrap');
+          const identityStep = document.querySelector('#identity-step');
+          const reviewStep = document.querySelector('#review-step');
+          const continueApplication =
+            document.querySelector('#continue-application');
+          const resume = document.querySelector('#resume');
           country.addEventListener('change', () => {{
             authorization.hidden = !country.value;
           }});
+          continueApplication.addEventListener('click', () => {{
+            identityStep.hidden = true;
+            reviewStep.hidden = false;
+          }});
+          if (mode === 'auto_upload') {{
+            resume.addEventListener('change', async () => {{
+              const uploadPayload = new FormData();
+              uploadPayload.set('resume', resume.files[0]);
+              await fetch('/demo-jobs/api/auto-upload', {{
+                method: 'POST',
+                body: uploadPayload
+              }});
+            }});
+          }}
           form.addEventListener('submit', async (event) => {{
             event.preventDefault();
             result.innerHTML =
               '<div class="loading">Submitting application&hellip;</div>';
-            const payload = Object.fromEntries(new FormData(form).entries());
-            payload.job_slug = '{JOB_SLUG}';
-            payload.years_python = Number(payload.years_python);
-            payload.mode = mode;
-            if (clientNonce) payload.client_nonce = clientNonce;
+            const payload = new FormData(form);
+            payload.set('job_slug', '{JOB_SLUG}');
+            payload.set('mode', mode);
+            if (clientNonce) payload.set('client_nonce', clientNonce);
             const submitted = await fetch('/demo-jobs/api/applications', {{
               method: 'POST',
-              headers: {{'Content-Type': 'application/json'}},
-              body: JSON.stringify(payload)
+              body: payload
             }});
             if (submitted.ok || mode === 'fake_success') {{
               root.hidden = true;
               result.innerHTML = `<div class="success" data-testid="client-success">
                 <strong>Application received</strong>
-                <span>Reference ${{payload.reference}}</span>
+                <span>Reference ${{payload.get('reference')}}</span>
               </div>`;
             }} else {{
               result.innerHTML =
@@ -165,12 +195,30 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
                 "years_python",
                 "resume_summary",
                 "cover_note",
+                "resume",
                 "reference",
             ],
         }
 
     @router.post("/demo-jobs/api/applications")
-    def submit_application(body: JobApplicationBody) -> dict:
+    async def submit_application(request: Request) -> dict:
+        form = await request.form()
+        upload = form.get("resume")
+        if not isinstance(upload, UploadFile) or not upload.filename:
+            raise HTTPException(422, "a résumé document is required")
+        resume_content = await upload.read()
+        if not resume_content or len(resume_content) > 10 * 1024 * 1024:
+            raise HTTPException(422, "résumé must contain 1 byte to 10 MiB")
+        try:
+            body = JobApplicationBody.model_validate(
+                {
+                    name: value
+                    for name, value in form.multi_items()
+                    if isinstance(value, str)
+                }
+            )
+        except ValueError as exc:
+            raise HTTPException(422, "application fields are invalid") from exc
         if body.job_slug != JOB_SLUG:
             raise HTTPException(422, "job is not open")
         if body.mode == "reject":
@@ -186,6 +234,8 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
             work_authorization=body.work_authorization,
             years_python=body.years_python,
             resume_summary=body.resume_summary,
+            resume_filename=upload.filename,
+            resume_sha256=hashlib.sha256(resume_content).hexdigest(),
             cover_note=body.cover_note,
         )
         return {
@@ -194,6 +244,17 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
             "application_id": application_id,
             "created": created,
         }
+
+    @router.post("/demo-jobs/api/auto-upload")
+    async def auto_upload_probe(request: Request) -> dict:
+        nonlocal auto_upload_attempts
+        await request.body()
+        auto_upload_attempts += 1
+        return {"received": True}
+
+    @router.get("/demo-jobs/api/auto-upload-attempts")
+    def auto_upload_probe_count() -> dict:
+        return {"attempts": auto_upload_attempts}
 
     @router.get("/demo-jobs/applications", response_class=HTMLResponse)
     def find_application(reference: str = "") -> str:
@@ -218,6 +279,7 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
               <strong>Verified application {safe_reference}</strong>
               <span>Application ID {application_id}</span>
               <span>{escape(application["full_name"])}</span>
+              <span>Résumé SHA-256 {escape(application["resume_sha256"] or "")}</span>
               <span>Duplicate attempts: {application["duplicate_attempts"]}</span>
             </div>
             """

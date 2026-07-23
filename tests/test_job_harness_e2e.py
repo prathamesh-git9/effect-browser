@@ -30,6 +30,12 @@ def start_harness(tmp_path: Path, monkeypatch):
         "EFFECT_BROWSER_ARTIFACTS_DIRECTORY",
         str(tmp_path / "artifacts"),
     )
+    resume_path = tmp_path / "synthetic-resume.txt"
+    resume_path.write_text(
+        "Synthetic résumé fixture. This is not a real person's document.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS", str(tmp_path))
     get_settings.cache_clear()
     api.get_store.cache_clear()
     server = uvicorn.Server(
@@ -48,18 +54,22 @@ def browser() -> PlaywrightDriver:
         headless=True,
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
+        allowed_upload_roots=settings.allowed_upload_roots,
     )
 
 
 def prepare_application(base_url: str, mode: str):
     settings = get_settings()
     service = api.get_service()
-    service.policy = ActionPolicy((base_url,))
+    service.policy = ActionPolicy((base_url,), settings.allowed_upload_roots)
     task = service.create_task(
         tenant_id=settings.default_tenant_id,
         instruction="Submit one synthetic application and prove the ATS stored it.",
         start_url=base_url,
-        planner=JobHarnessPlanner(mode),
+        planner=JobHarnessPlanner(
+            mode,
+            get_settings().allowed_upload_roots[0] / "synthetic-resume.txt",
+        ),
     )
     first = browser()
     try:
@@ -73,13 +83,33 @@ def prepare_application(base_url: str, mode: str):
     action = paused.next_action
     assert action is not None
     assert action.state is ActionState.APPROVAL_REQUIRED
+    assert action.proposal.kind.value == "upload"
     service.store.approve_action(
         tenant_id=settings.default_tenant_id,
         action_id=action.id,
         expected_version=action.version,
         actor_id="job-harness-operator",
     )
-    return service, task, action
+    upload_runner = browser()
+    try:
+        paused = service.run(
+            tenant_id=settings.default_tenant_id,
+            task_id=task.id,
+            driver=upload_runner,
+        )
+    finally:
+        upload_runner.close()
+    submit = paused.next_action
+    assert submit is not None
+    assert submit.state is ActionState.APPROVAL_REQUIRED
+    assert submit.proposal.kind.value == "submit"
+    service.store.approve_action(
+        tenant_id=settings.default_tenant_id,
+        action_id=submit.id,
+        expected_version=submit.version,
+        actor_id="job-harness-operator",
+    )
+    return service, task, submit
 
 
 @pytest.mark.e2e

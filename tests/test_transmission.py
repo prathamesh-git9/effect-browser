@@ -56,6 +56,48 @@ def test_urlencoded_request_keeps_duplicate_fields_in_order() -> None:
     ]
 
 
+def test_multipart_fingerprint_ignores_boundary_but_binds_file_bytes() -> None:
+    def body(boundary: str, document: bytes) -> bytes:
+        return (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="full_name"\r\n\r\n'
+            "Synthetic Candidate\r\n"
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="resume"; '
+            'filename="synthetic-resume.txt"\r\n'
+            "Content-Type: text/plain\r\n\r\n"
+        ).encode() + document + f"\r\n--{boundary}--\r\n".encode()
+
+    first = fingerprint_request(
+        method="POST",
+        url="https://jobs.example.test/apply",
+        headers={"content-type": "multipart/form-data; boundary=first-boundary"},
+        body=body("first-boundary", b"synthetic resume bytes"),
+    )
+    regenerated = fingerprint_request(
+        method="POST",
+        url="https://jobs.example.test/apply",
+        headers={"content-type": "multipart/form-data; boundary=second-boundary"},
+        body=body("second-boundary", b"synthetic resume bytes"),
+    )
+    changed_document = fingerprint_request(
+        method="POST",
+        url="https://jobs.example.test/apply",
+        headers={"content-type": "multipart/form-data; boundary=third-boundary"},
+        body=body("third-boundary", b"changed synthetic resume bytes"),
+    )
+
+    assert first.content_type == "multipart/form-data"
+    assert first.request_sha256 == regenerated.request_sha256
+    assert first.body_sha256 == regenerated.body_sha256
+    assert first.wire_body_sha256 != regenerated.wire_body_sha256
+    assert first.request_sha256 != changed_document.request_sha256
+    assert len(first.document_sha256s) == 1
+    file_field = next(field for field in first.fields if field.name == "resume")
+    assert "synthetic-resume.txt" in (file_field.value or "")
+    assert first.document_sha256s[0] in (file_field.value or "")
+
+
 def test_unsupported_or_oversized_request_fails_closed() -> None:
     with pytest.raises(TransmissionReviewError, match="unsupported"):
         fingerprint_request(

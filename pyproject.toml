@@ -18,6 +18,7 @@ dependencies = [
   "prometheus-client>=0.21",
   "pydantic>=2.9",
   "pydantic-settings>=2.8",
+  "python-multipart>=0.0.20",
   "scrapling==0.4.11",
   "sqlalchemy>=2.0",
   "typer>=0.12",

@@ -36,19 +36,19 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] Scrapling generates candidates and relocates a saved element after DOM drift.
 - [x] Links, reversible controls, ambiguous clicks, and commits receive different
       deterministic risk treatment.
-- [ ] The engine supports navigation, click, fill, select, file upload, and submit.
+- [x] The engine supports navigation, click, fill, select, file upload, and submit.
 - [x] A factual profile stores answer value, source, sensitivity, and user
       verification state.
 - [ ] Missing or unverified consequential answers stop the workflow.
 - [x] Résumé bytes stay outside prompts and logs; only approved local paths reach
       the browser executor.
-- [ ] A final review displays every outgoing field and document hash before submit.
+- [x] A final review displays every outgoing field and document hash before submit.
 - [x] Approval binds the final action, outgoing payload hash, and page-state hash.
-- [ ] The dynamic ATS harness includes hydration, conditional fields, file upload,
+- [x] The dynamic ATS harness includes hydration, conditional fields, file upload,
       an iframe or multi-step transition, duplicate protection, and fake success.
-- [ ] A generic reactive planner completes the harness without a site-specific plan.
-- [ ] Fake success never becomes verified success.
-- [ ] A crash after target commit never causes an automatic second submit.
+- [x] A generic reactive planner completes the harness without a site-specific plan.
+- [x] Fake success never becomes verified success.
+- [x] A crash after target commit never causes an automatic second submit.
 - [ ] CAPTCHA and MFA produce an explicit human-handoff state.
 - [ ] Task, action, approval, profile, receipt, and audit APIs are tenant-isolated.
 - [ ] CLI, dashboard, MCP, Docker, and operations documentation expose the workflow.
@@ -64,8 +64,8 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] R5: Factual profile and answer provenance.
 - [x] R6: File upload with path allowlist and content hash.
 - [x] R7: Final outgoing-payload review gate.
-- [ ] R8: Multi-page adversarial ATS harness.
-- [ ] R9: Generic deterministic reactive-agent tests.
+- [x] R8: Multi-page adversarial ATS harness.
+- [x] R9: Generic deterministic reactive-agent tests.
 - [ ] R10: Live OpenAI and Grok evaluations.
 - [ ] R11: Dashboard, CLI, MCP, operations, packaging, and release hardening.
 

@@ -93,9 +93,17 @@ async def lifespan(_app: FastAPI):
 
 def planner(name: str):
     settings = get_settings()
+    harness_resume = next(
+        (
+            candidate
+            for root in settings.allowed_upload_roots
+            if (candidate := (root / "synthetic-resume.txt").resolve()).is_file()
+        ),
+        None,
+    )
     planners = {
         "deterministic": DeterministicPlanner(),
-        "job-harness": JobHarnessPlanner(),
+        "job-harness": JobHarnessPlanner(resume_path=harness_resume),
         "openai": OpenAIPlanner(settings.openai_model),
         "openai-reactive": ReactiveBootstrapPlanner("openai-reactive"),
         "grok": GrokPlanner(settings.grok_model),

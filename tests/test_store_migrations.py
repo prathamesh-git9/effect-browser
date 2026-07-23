@@ -62,6 +62,24 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
             """
         )
         connection.execute(
+            """
+            CREATE TABLE demo_job_applications (
+                id VARCHAR(36) PRIMARY KEY,
+                reference VARCHAR(100) NOT NULL,
+                job_slug VARCHAR(120) NOT NULL,
+                full_name VARCHAR(200) NOT NULL,
+                email VARCHAR(320) NOT NULL,
+                country VARCHAR(100) NOT NULL,
+                work_authorization VARCHAR(100) NOT NULL,
+                years_python INTEGER NOT NULL,
+                resume_summary TEXT NOT NULL,
+                cover_note TEXT NOT NULL,
+                duplicate_attempts INTEGER NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.execute(
             "INSERT INTO actions (id, action_sha256, proposal) VALUES (?, ?, ?)",
             ("action-1", proposal.action_hash(), proposal.model_dump_json()),
         )
@@ -90,6 +108,10 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
         columns = {
             column["name"] for column in inspect(store.engine).get_columns("approvals")
         }
+        job_columns = {
+            column["name"]
+            for column in inspect(store.engine).get_columns("demo_job_applications")
+        }
         with store.engine.connect() as connection:
             payload_sha256 = connection.execute(
                 text("SELECT payload_sha256 FROM approvals WHERE id='approval-1'")
@@ -98,5 +120,6 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
         store.close()
 
     assert "payload_sha256" in columns
+    assert {"resume_filename", "resume_sha256"} <= job_columns
     assert proposal.outgoing_review is not None
     assert payload_sha256 == proposal.outgoing_review.payload_sha256

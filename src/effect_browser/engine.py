@@ -45,6 +45,12 @@ class CrashAfterCommitDriver:
     def preview_submit(self, action, observation_sha256):
         return self.inner.preview_submit(action, observation_sha256)
 
+    def arm_reviewed_submit(self, review, allowed_origin_url):
+        return self.inner.arm_reviewed_submit(review, allowed_origin_url)
+
+    def assert_rehydration_safe(self):
+        return self.inner.assert_rehydration_safe()
+
     def execute(self, action):
         receipt = self.inner.execute(action)
         if action.kind is ActionKind.SUBMIT and not self.crashed:
@@ -137,7 +143,44 @@ class EffectBrowserService:
         worker_id: str,
     ) -> RunResult:
         task = self.store.get_task(tenant_id, task_id)
-        self._rehydrate(tenant_id, task_id, driver, task.current_ordinal)
+        current = self.store.current_action(tenant_id, task_id)
+        replay_uploads = bool(
+            current is not None
+            and current.state is ActionState.PREPARED
+            and current.proposal.kind is ActionKind.SUBMIT
+            and current.proposal.outgoing_review is not None
+            and len(current.proposal.outgoing_review.requests) == 1
+        )
+        if replay_uploads:
+            driver.arm_reviewed_submit(
+                current.proposal.outgoing_review,
+                task.start_url,
+            )
+        self._rehydrate(
+            tenant_id,
+            task_id,
+            driver,
+            task.current_ordinal,
+            replay_uploads=replay_uploads,
+        )
+        if replay_uploads:
+            try:
+                driver.assert_rehydration_safe()
+            except TransmissionBlocked as exc:
+                self.store.start_dispatch(tenant_id, current.id)
+                failed = self.store.fail_action(
+                    tenant_id,
+                    current.id,
+                    f"upload rehydration blocked before submission: {exc}",
+                )
+                return RunResult(
+                    task=self.store.get_task(tenant_id, task_id),
+                    next_action=failed,
+                    message=(
+                        "restoring the approved upload triggered an unexpected "
+                        "request; it was blocked before transmission"
+                    ),
+                )
 
         while True:
             self.store.renew_task_lease(
@@ -341,8 +384,13 @@ class EffectBrowserService:
                     task=self.store.get_task(tenant_id, task_id),
                     next_action=failed,
                     message=(
-                        "outgoing request changed after approval and was blocked "
-                        "before transmission"
+                        "file selection triggered an unreviewed request and was "
+                        "blocked before transmission"
+                        if action.proposal.kind is ActionKind.UPLOAD
+                        else (
+                            "outgoing request changed after approval and was blocked "
+                            "before transmission"
+                        )
                     ),
                 )
             except Exception as exc:
@@ -437,6 +485,8 @@ class EffectBrowserService:
         task_id: UUID,
         driver: BrowserDriver,
         current_ordinal: int,
+        *,
+        replay_uploads: bool = False,
     ) -> None:
         if current_ordinal == 0:
             return
@@ -449,7 +499,9 @@ class EffectBrowserService:
                 ActionKind.NAVIGATE,
                 ActionKind.FILL,
                 ActionKind.CLICK,
-            }:
+            } or (
+                replay_uploads and action.proposal.kind is ActionKind.UPLOAD
+            ):
                 driver.execute(action.proposal)
 
     @staticmethod

@@ -79,6 +79,11 @@ class PlaywrightDriver:
         self._snapshotter = ScraplingSnapshotter(
             artifacts_directory / "scrapling-elements.db"
         )
+        self._rehydration_handler = None
+        self._rehydration_origin: str | None = None
+        self._rehydration_contains_upload = False
+        self._rehydration_violations: list[str] = []
+        self._armed_review: OutgoingReview | None = None
 
     def observe(self) -> Observation:
         self._stabilize()
@@ -180,6 +185,7 @@ class PlaywrightDriver:
             raise TransmissionReviewError(
                 "outgoing review does not match the previewed page state"
             )
+        self.assert_rehydration_safe()
         captured = []
         failures: list[str] = []
 
@@ -198,6 +204,7 @@ class PlaywrightDriver:
             route.abort("blockedbyclient")
 
         self._context.route("**/*", abort_and_capture)
+        self._remove_rehydration_guard()
         try:
             try:
                 self._locator(action).click(timeout=5_000)
@@ -218,6 +225,56 @@ class PlaywrightDriver:
             )
         return base_review.bind_requests(tuple(captured))
 
+    def arm_reviewed_submit(
+        self,
+        review: OutgoingReview,
+        allowed_origin_url: str,
+    ) -> None:
+        if len(review.requests) != 1:
+            raise TransmissionReviewError(
+                "submit rehydration requires one approved outgoing request"
+            )
+        if self._rehydration_handler is not None:
+            raise TransmissionReviewError("submit rehydration is already armed")
+        self._install_upload_guard(allowed_origin_url)
+        self._armed_review = review
+
+    def _install_upload_guard(self, allowed_origin_url: str) -> None:
+        self._rehydration_origin = _origin(allowed_origin_url)
+        self._rehydration_contains_upload = False
+        self._rehydration_violations = []
+
+        def guard(route: Route) -> None:
+            method = route.request.method.upper()
+            parsed = urlsplit(route.request.url)
+            safe_before_upload = method in {"GET", "HEAD", "OPTIONS"}
+            safe_after_upload = (
+                safe_before_upload
+                and _origin(route.request.url) == self._rehydration_origin
+                and not parsed.query
+            )
+            if (
+                safe_after_upload
+                if self._rehydration_contains_upload
+                else safe_before_upload
+            ):
+                route.continue_()
+                return
+            self._rehydration_violations.append(
+                f"{method} {parsed.scheme}://{parsed.netloc}{parsed.path}"
+            )
+            route.abort("blockedbyclient")
+
+        self._rehydration_handler = guard
+        self._context.route("**/*", guard)
+
+    def assert_rehydration_safe(self) -> None:
+        if self._rehydration_violations:
+            raise TransmissionBlocked(
+                "approved file selection triggered an unapproved request; "
+                "the request was blocked"
+            )
+
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         if action.kind is ActionKind.NAVIGATE:
             self._page.goto(action.url or "", wait_until="domcontentloaded")
@@ -232,6 +289,9 @@ class PlaywrightDriver:
                 action.file_path or Path(),
                 action.document_sha256 or "",
             )
+            if self._rehydration_handler is None:
+                self._install_upload_guard(self._page.url)
+            self._rehydration_contains_upload = True
             self._locator(action).set_input_files(
                 {
                     "name": upload.path.name,
@@ -242,6 +302,11 @@ class PlaywrightDriver:
                     "buffer": upload.content,
                 }
             )
+            # File-input change handlers commonly auto-upload. Give them an event
+            # loop turn under the write-blocking guard; never allow an unreviewed
+            # upload request to escape merely because file selection was approved.
+            self._page.wait_for_timeout(350)
+            self.assert_rehydration_safe()
         elif (
             action.kind is ActionKind.SUBMIT
             and action.outgoing_review is not None
@@ -265,6 +330,12 @@ class PlaywrightDriver:
                 "reviewed submit requires exactly one approved request"
             )
         expected = review.requests[0]
+        if self._armed_review is not None:
+            if self._armed_review.payload_sha256 != review.payload_sha256:
+                raise TransmissionBlocked(
+                    "the dispatch review differs from the rehydration guard"
+                )
+            self.assert_rehydration_safe()
         sent = False
         mismatch: list[str] = []
         unexpected_requests: list[str] = []
@@ -301,7 +372,11 @@ class PlaywrightDriver:
             sent = True
             route.continue_()
 
+        # Register the stricter dispatch handler before removing the rehydration
+        # guard. Playwright invokes the most recently registered handler first, so
+        # there is no unguarded event-loop turn between file replay and submission.
         self._context.route("**/*", compare_and_dispatch)
+        self._remove_rehydration_guard()
         click_error: PlaywrightError | None = None
         try:
             try:
@@ -324,6 +399,15 @@ class PlaywrightDriver:
             )
         if click_error is not None:
             raise click_error
+
+    def _remove_rehydration_guard(self) -> None:
+        handler = self._rehydration_handler
+        if handler is not None:
+            self._context.unroute("**/*", handler=handler)
+        self._rehydration_handler = None
+        self._rehydration_origin = None
+        self._rehydration_contains_upload = False
+        self._armed_review = None
 
     def reconcile(self, spec: ReconciliationSpec) -> BrowserReceipt | None:
         self._page.goto(spec.url, wait_until="domcontentloaded")

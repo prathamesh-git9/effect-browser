@@ -182,7 +182,14 @@ class ReviewedRequest(DomainModel):
     url_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     content_type: str = Field(max_length=500)
     body_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Older persisted reviews predate wire evidence. It is intentionally excluded
+    # from request_sha256 because multipart boundaries are regenerated per request.
+    wire_body_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     fields: tuple[ReviewedRequestField, ...] = ()
+    document_sha256s: tuple[str, ...] = ()
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     def fingerprint_body(self) -> dict[str, Any]:
@@ -193,6 +200,7 @@ class ReviewedRequest(DomainModel):
             "content_type": self.content_type,
             "body_sha256": self.body_sha256,
             "fields": [field.model_dump(mode="json") for field in self.fields],
+            "document_sha256s": list(self.document_sha256s),
         }
 
     @model_validator(mode="after")
@@ -233,15 +241,29 @@ class OutgoingReview(DomainModel):
         self,
         requests: tuple[ReviewedRequest, ...],
     ) -> OutgoingReview:
+        captured_documents = tuple(
+            document_sha256
+            for request in requests
+            for document_sha256 in request.document_sha256s
+        )
+        if (
+            self.document_sha256s
+            and captured_documents
+            and self.document_sha256s != captured_documents
+        ):
+            raise ValueError(
+                "captured outgoing document bytes do not match the reviewed upload"
+            )
+        document_sha256s = captured_documents or self.document_sha256s
         body: dict[str, Any] = {
             "fields": [field.model_dump(mode="json") for field in self.fields],
-            "document_sha256s": list(self.document_sha256s),
+            "document_sha256s": list(document_sha256s),
             "requests": [request.model_dump(mode="json") for request in requests],
             "observation_sha256": self.observation_sha256,
         }
         return OutgoingReview(
             fields=self.fields,
-            document_sha256s=self.document_sha256s,
+            document_sha256s=document_sha256s,
             requests=requests,
             observation_sha256=self.observation_sha256,
             payload_sha256=digest(body),

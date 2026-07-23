@@ -94,7 +94,7 @@ def bind_choice(
             for action in prior_actions
             if action.kind is ActionKind.UPLOAD and action.target_name is not None
         }
-        fields = tuple(
+        fields = [
             ReviewField(
                 candidate_id=candidate.id,
                 label=candidate.name,
@@ -110,7 +110,23 @@ def bind_choice(
             )
             for candidate in snapshot.candidates
             if candidate.interaction == "input" and candidate.current_value is not None
-        )
+        ]
+        visible_names = {field.label for field in fields}
+        for name, source in latest_fill_by_name.items():
+            if name in visible_names or source.value is None:
+                continue
+            fields.append(
+                ReviewField(
+                    candidate_id=(
+                        source.locator.adaptive_id
+                        if source.locator and source.locator.adaptive_id
+                        else f"prior-{source.action_hash()[:20]}"
+                    ),
+                    label=name,
+                    value=source.value,
+                    source_action_sha256=source.action_hash(),
+                )
+            )
         document_sha256s = tuple(
             source.document_sha256
             for candidate in snapshot.candidates
@@ -125,7 +141,7 @@ def bind_choice(
             "observation_sha256": snapshot.state_sha256,
         }
         outgoing_review = OutgoingReview(
-            fields=fields,
+            fields=tuple(fields),
             document_sha256s=document_sha256s,
             observation_sha256=snapshot.state_sha256,
             payload_sha256=digest(review_body),

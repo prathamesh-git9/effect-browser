@@ -217,6 +217,8 @@ class DemoJobApplicationRow(Base):
     work_authorization: Mapped[str] = mapped_column(String(100))
     years_python: Mapped[int] = mapped_column(Integer)
     resume_summary: Mapped[str] = mapped_column(Text)
+    resume_filename: Mapped[str | None] = mapped_column(String(255))
+    resume_sha256: Mapped[str | None] = mapped_column(String(64))
     cover_note: Mapped[str] = mapped_column(Text)
     duplicate_attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -249,21 +251,49 @@ class DatabaseStore:
     def _apply_additive_migrations(self) -> None:
         """Upgrade schemas created by earlier releases without deleting data."""
         inspector = inspect(self.engine)
-        if "approvals" not in inspector.get_table_names():
-            return
-        columns = {column["name"] for column in inspector.get_columns("approvals")}
-        if "payload_sha256" not in columns:
-            if self.engine.dialect.name == "postgresql":
-                statement = (
-                    "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS "
-                    "payload_sha256 VARCHAR(64)"
+        tables = set(inspector.get_table_names())
+        if "approvals" in tables:
+            columns = {
+                column["name"] for column in inspector.get_columns("approvals")
+            }
+            if "payload_sha256" not in columns:
+                if self.engine.dialect.name == "postgresql":
+                    statement = (
+                        "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS "
+                        "payload_sha256 VARCHAR(64)"
+                    )
+                else:
+                    # SQLite is supported for one operator process only.
+                    statement = (
+                        "ALTER TABLE approvals ADD COLUMN payload_sha256 VARCHAR(64)"
+                    )
+                with self.engine.begin() as connection:
+                    connection.exec_driver_sql(statement)
+            self._backfill_payload_approval_hashes()
+        if "demo_job_applications" in tables:
+            columns = {
+                column["name"]
+                for column in inspect(self.engine).get_columns(
+                    "demo_job_applications"
                 )
-            else:
-                # SQLite is supported for one operator process only.
-                statement = "ALTER TABLE approvals ADD COLUMN payload_sha256 VARCHAR(64)"
-            with self.engine.begin() as connection:
-                connection.exec_driver_sql(statement)
-        self._backfill_payload_approval_hashes()
+            }
+            additions = {
+                "resume_filename": "VARCHAR(255)",
+                "resume_sha256": "VARCHAR(64)",
+            }
+            for name, sql_type in additions.items():
+                if name in columns:
+                    continue
+                qualifier = (
+                    " IF NOT EXISTS"
+                    if self.engine.dialect.name == "postgresql"
+                    else ""
+                )
+                with self.engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE demo_job_applications "
+                        f"ADD COLUMN{qualifier} {name} {sql_type}"
+                    )
 
     def _backfill_payload_approval_hashes(self) -> None:
         """Recover explicit hashes already covered by valid legacy action hashes."""
@@ -1335,6 +1365,8 @@ class DatabaseStore:
         work_authorization: str,
         years_python: int,
         resume_summary: str,
+        resume_filename: str,
+        resume_sha256: str,
         cover_note: str,
     ) -> tuple[str, bool]:
         with self.session() as session:
@@ -1356,6 +1388,8 @@ class DatabaseStore:
                 work_authorization=work_authorization,
                 years_python=years_python,
                 resume_summary=resume_summary,
+                resume_filename=resume_filename,
+                resume_sha256=resume_sha256,
                 cover_note=cover_note,
                 duplicate_attempts=0,
                 created_at=utc_now(),
@@ -1577,6 +1611,8 @@ class DatabaseStore:
             "work_authorization": row.work_authorization,
             "years_python": row.years_python,
             "resume_summary": row.resume_summary,
+            "resume_filename": row.resume_filename,
+            "resume_sha256": row.resume_sha256,
             "cover_note": row.cover_note,
             "duplicate_attempts": row.duplicate_attempts,
             "created_at": _as_utc(row.created_at).isoformat(),

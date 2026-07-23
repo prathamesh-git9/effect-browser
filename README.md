@@ -68,17 +68,24 @@ more directories. Every upload action binds an absolute path and the raw-byte SH
 policy checks the allowlist and content, and the browser executor checks both again
 immediately before attaching the file. Snapshots expose only whether a file is selected,
 never its local path or filename. Every file selection requires an action-bound operator
-approval because an ATS may transmit on `change`. A completed upload is never replayed
-automatically after a browser restart; the workflow blocks rather than risking a second
-transmission.
+approval. The browser installs a write-blocking route before selecting the file; an ATS
+that tries to auto-upload on `change` is blocked before the server receives it. For an
+approved final submit, the exact guard is installed before the file input is replayed
+after a browser restart.
+
+The dashboard's `job-harness` provider is deliberately synthetic. Put a non-personal
+fixture named `synthetic-resume.txt` in one configured upload root; task creation fails
+clearly if that fixture is absent. Never point the harness at an employer.
 
 Submit approval is based on an abort-first network preview, not only the visible DOM.
 Effect Browser routes the click-generated request, records its method, redacted target,
-raw URL/body hashes, content type, and parsed outgoing fields, then aborts it before the
-network. Approval binds that request fingerprint, the action, and the page state. On
-dispatch, a changed first request is blocked before transmission. The current exact
-preview supports one JSON or URL-encoded request up to 12 MiB; multipart file submits
-and multi-write submit flows still fail closed.
+URL and wire-body evidence, canonical body hash, content type, parsed outgoing fields,
+and raw document hashes, then aborts it before the network. Approval binds that request
+fingerprint, the action, and the page state. On dispatch, a changed first request is
+blocked before transmission. The current exact preview supports one JSON, URL-encoded,
+or multipart request up to 12 MiB. Multipart comparison ignores only the regenerated
+boundary; filename, MIME type, size, document bytes, field order, and values remain
+bound. Streaming and multi-write submit flows fail closed.
 
 Scrapling's role and limitations are recorded in
 [docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion

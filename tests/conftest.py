@@ -87,6 +87,16 @@ class FakeDriver:
         )
         return base.bind_requests((reviewed,))
 
+    def arm_reviewed_submit(
+        self,
+        review: OutgoingReview,
+        allowed_origin_url: str,
+    ) -> None:
+        return None
+
+    def assert_rehydration_safe(self) -> None:
+        return None
+
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         if action.kind is ActionKind.NAVIGATE:
             self.url = action.url or self.url

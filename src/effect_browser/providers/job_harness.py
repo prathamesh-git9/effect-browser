@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from urllib.parse import urlencode, urljoin
 
 from effect_browser.domain import (
@@ -16,12 +18,17 @@ class JobHarnessPlanner:
 
     name = "job-harness"
 
-    def __init__(self, mode: str = "real") -> None:
+    def __init__(self, mode: str = "real", resume_path: Path | None = None) -> None:
         if mode not in {"real", "fake_success", "reject"}:
             raise ValueError("job harness mode must be real, fake_success, or reject")
         self.mode = mode
+        self.resume_path = resume_path
 
     def plan(self, request: PlanRequest) -> tuple[ProposedAction, ...]:
+        if self.resume_path is None:
+            raise ValueError(
+                "job-harness requires synthetic-resume.txt in an allowed upload root"
+            )
         reference = f"JOBAPP-{str(request.task_id)[:8].upper()}"
         root = request.start_url.rstrip("/") + "/"
         apply_path = "demo-jobs/jobs/platform-reliability-engineer/apply"
@@ -29,6 +36,17 @@ class JobHarnessPlanner:
         receipt_url = (
             f"{urljoin(root, 'demo-jobs/applications')}?"
             f"{urlencode({'reference': reference})}"
+        )
+        upload_actions = (
+            ProposedAction(
+                kind=ActionKind.UPLOAD,
+                locator=Locator(label="Résumé document"),
+                file_path=self.resume_path.resolve(),
+                document_sha256=hashlib.sha256(
+                    self.resume_path.read_bytes()
+                ).hexdigest(),
+                description="Attach the approved synthetic résumé document.",
+            ),
         )
         return (
             ProposedAction(
@@ -76,6 +94,15 @@ class JobHarnessPlanner:
                 description="Fill a clearly synthetic resume summary.",
             ),
             ProposedAction(
+                kind=ActionKind.CLICK,
+                locator=Locator(
+                    role="link",
+                    name="Continue to document and review",
+                ),
+                description="Continue to the document and final review step.",
+                target_interaction="navigation",
+            ),
+            ProposedAction(
                 kind=ActionKind.FILL,
                 locator=Locator(label="Why this role?"),
                 value=(
@@ -84,6 +111,7 @@ class JobHarnessPlanner:
                 ),
                 description="Fill a clearly synthetic cover note.",
             ),
+            *upload_actions,
             ProposedAction(
                 kind=ActionKind.FILL,
                 locator=Locator(label="Application reference"),

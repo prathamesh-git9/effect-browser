@@ -45,20 +45,24 @@ function renderOutgoingReview(review) {
       ? `<table class="review-table"><thead><tr><th>Outgoing field</th><th>Exact value</th></tr></thead>
         <tbody>${request.fields.map((field) => `<tr><td>${escapeHtml(field.name)}</td>
         <td>${field.redacted
-          ? `<em>redacted</em> · SHA-256 ${escapeHtml(short(field.value_sha256))}`
+          ? `<em>redacted</em> &middot; SHA-256 ${escapeHtml(short(field.value_sha256))}`
           : escapeHtml(field.value)}</td></tr>`).join("")}</tbody></table>`
       : '<p class="empty">This request has no query or body fields.</p>';
     return `<article><p><strong>${escapeHtml(request.method)}
       ${escapeHtml(request.target)}</strong><br>
       Content-Type: ${escapeHtml(request.content_type || "none")}</p>
       ${requestFields}
-      <p><strong>Raw body SHA-256:</strong><br>
+      <p><strong>Canonical body SHA-256:</strong><br>
       <code>${escapeHtml(request.body_sha256)}</code><br>
+      ${request.wire_body_sha256
+        ? `<strong>Preview wire-body SHA-256:</strong><br>
+          <code>${escapeHtml(request.wire_body_sha256)}</code><br>`
+        : ""}
       <strong>Request fingerprint SHA-256:</strong><br>
       <code>${escapeHtml(request.request_sha256)}</code></p></article>`;
   }).join("");
   const kicker = requests.length
-    ? "ABORTED NETWORK PREVIEW · NOTHING SENT"
+    ? "ABORTED NETWORK PREVIEW &middot; NOTHING SENT"
     : "OBSERVED LIVE FORM VALUES";
   return `<section class="outgoing-review"><p class="kicker">${kicker}</p>
     ${network}
@@ -147,17 +151,17 @@ function renderGate(action) {
         <strong>Observed URL:</strong> ${escapeHtml(action.observation_url)}</p>`;
     gate.className = "gate";
     gate.innerHTML = `
-      <p class="kicker">${isUpload ? "DOCUMENT TRANSMISSION GATE" : "EXTERNAL COMMIT GATE"}</p>
+      <p class="kicker">${isUpload ? "LOCAL FILE-SELECTION GATE" : "EXTERNAL COMMIT GATE"}</p>
       <h3>Operator decision required</h3>
       <p>${escapeHtml(action.proposal.description)} ${isUpload
-        ? "Selecting a file may transmit it immediately on this page."
+        ? "File selection is approved, but any unreviewed auto-upload request is blocked."
         : "The approval binds this exact action to the observed page state; any drift invalidates it."}</p>
       <div class="hashes"><div><small>ACTION SHA-256</small><code title="${action.action_sha256}">${action.action_sha256}</code></div>
       <div><small>OBSERVATION SHA-256</small><code title="${action.observation_sha256}">${action.observation_sha256}</code></div></div>
       ${details}
       ${renderOutgoingReview(action.proposal.outgoing_review)}
       <div class="gate-actions"><button class="primary" id="approve">${isUpload
-        ? "Approve document transmission"
+        ? "Approve local file selection"
         : "Approve exact commit"}</button>
       <button class="primary danger" id="reject">Reject</button></div>`;
     $("#approve").addEventListener("click", (event) => mutate(
