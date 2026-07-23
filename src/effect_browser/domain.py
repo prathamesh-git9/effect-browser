@@ -72,6 +72,34 @@ class Resolution(StrEnum):
     NOT_COMMITTED = "not_committed"
 
 
+class AnswerSourceKind(StrEnum):
+    USER = "user"
+    RESUME = "resume"
+    DOCUMENT = "document"
+
+
+class AnswerSensitivity(StrEnum):
+    STANDARD = "standard"
+    PERSONAL = "personal"
+    CONSEQUENTIAL = "consequential"
+
+
+class VerificationState(StrEnum):
+    UNVERIFIED = "unverified"
+    VERIFIED = "verified"
+
+
+class AnswerSource(DomainModel):
+    kind: AnswerSourceKind
+    reference: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def require_document_reference(self) -> AnswerSource:
+        if self.kind is not AnswerSourceKind.USER and self.reference is None:
+            raise ValueError("resume and document sources require a reference")
+        return self
+
+
 class Locator(DomainModel):
     role: str | None = Field(
         default=None,
@@ -291,6 +319,46 @@ class Task(DomainModel):
     version: int
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
+
+
+class FactualProfile(DomainModel):
+    id: UUID
+    tenant_id: UUID
+    name: str = Field(min_length=1, max_length=120)
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+
+
+class ProfileAnswer(DomainModel):
+    id: UUID
+    tenant_id: UUID
+    profile_id: UUID
+    field_name: str = Field(
+        min_length=1,
+        max_length=120,
+        pattern=r"^[a-z][a-z0-9_.-]*$",
+    )
+    value: str = Field(min_length=1, max_length=10_000)
+    source: AnswerSource
+    sensitivity: AnswerSensitivity
+    verification_state: VerificationState
+    verified_by: str | None = None
+    verified_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def verification_metadata_matches_state(self) -> ProfileAnswer:
+        metadata_present = self.verified_by is not None or self.verified_at is not None
+        if self.verification_state is VerificationState.VERIFIED and (
+            self.verified_by is None or self.verified_at is None
+        ):
+            raise ValueError("verified answers require verifier metadata")
+        if self.verification_state is VerificationState.UNVERIFIED and metadata_present:
+            raise ValueError("unverified answers cannot retain verifier metadata")
+        return self
 
 
 class BrowserAction(DomainModel):

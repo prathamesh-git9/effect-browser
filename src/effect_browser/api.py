@@ -18,7 +18,13 @@ from pydantic import BaseModel, Field
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
 from effect_browser.demo_target import create_demo_router
-from effect_browser.domain import BrowserReceipt, Resolution
+from effect_browser.domain import (
+    AnswerSensitivity,
+    AnswerSource,
+    BrowserReceipt,
+    Resolution,
+    VerificationState,
+)
 from effect_browser.engine import EffectBrowserService
 from effect_browser.job_target import create_demo_job_router
 from effect_browser.policy import ActionPolicy
@@ -131,6 +137,18 @@ class ResolutionBody(BaseModel):
     evidence_sha256: str | None = None
 
 
+class CreateProfileBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class PutProfileAnswerBody(BaseModel):
+    value: str = Field(min_length=1, max_length=10_000)
+    source: AnswerSource
+    sensitivity: AnswerSensitivity
+    verification_state: VerificationState = VerificationState.UNVERIFIED
+    expected_version: int | None = Field(default=None, ge=1)
+
+
 app = FastAPI(
     title="Effect Browser",
     version="0.2.0",
@@ -232,6 +250,60 @@ def list_tasks(
     service: Annotated[EffectBrowserService, Depends(get_service)],
 ):
     return service.store.list_tasks(who.tenant_id)
+
+
+@app.post("/v1/profiles", status_code=201)
+def create_profile(
+    body: CreateProfileBody,
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.create_profile(
+        tenant_id=who.tenant_id,
+        name=body.name,
+    )
+
+
+@app.get("/v1/profiles")
+def list_profiles(
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.list_profiles(who.tenant_id)
+
+
+@app.get("/v1/profiles/{profile_id}")
+def profile_detail(
+    profile_id: UUID,
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+) -> dict[str, Any]:
+    return {
+        "profile": service.store.get_profile(who.tenant_id, profile_id),
+        "answers": service.store.list_profile_answers(who.tenant_id, profile_id),
+        "events": service.store.profile_events(who.tenant_id, profile_id),
+    }
+
+
+@app.put("/v1/profiles/{profile_id}/answers/{field_name}")
+def put_profile_answer(
+    profile_id: UUID,
+    field_name: str,
+    body: PutProfileAnswerBody,
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.put_profile_answer(
+        tenant_id=who.tenant_id,
+        profile_id=profile_id,
+        field_name=field_name,
+        value=body.value,
+        source=body.source,
+        sensitivity=body.sensitivity,
+        verification_state=body.verification_state,
+        expected_version=body.expected_version,
+        actor_id=who.actor_id,
+    )
 
 
 @app.get("/v1/tasks/{task_id}")

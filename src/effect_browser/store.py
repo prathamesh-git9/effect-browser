@@ -26,19 +26,26 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from effect_browser.domain import (
     ActionState,
+    AnswerSensitivity,
+    AnswerSource,
+    AnswerSourceKind,
     Approval,
     ApprovalDecision,
     AuditEvent,
     AuditVerification,
     BrowserAction,
     BrowserReceipt,
+    FactualProfile,
     Observation,
     PolicyDecision,
+    ProfileAnswer,
     ProposedAction,
     RiskClass,
     Task,
     TaskStatus,
+    VerificationState,
     canonical_json,
+    digest,
     utc_now,
 )
 
@@ -140,6 +147,49 @@ class TenantLedgerRow(Base):
     head_hash: Mapped[str] = mapped_column(String(64))
 
 
+class FactualProfileRow(Base):
+    __tablename__ = "factual_profiles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_tenant_profile_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class ProfileAnswerRow(Base):
+    __tablename__ = "profile_answers"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "profile_id",
+            "field_name",
+            name="uq_tenant_profile_answer",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("factual_profiles.id"), index=True
+    )
+    field_name: Mapped[str] = mapped_column(String(120))
+    value: Mapped[str] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(String(40))
+    source_reference: Mapped[str | None] = mapped_column(String(500))
+    sensitivity: Mapped[str] = mapped_column(String(40))
+    verification_state: Mapped[str] = mapped_column(String(40))
+    verified_by: Mapped[str | None] = mapped_column(String(200))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class DemoOrderRow(Base):
     __tablename__ = "demo_orders"
 
@@ -212,6 +262,172 @@ class DatabaseStore:
     def reset(self) -> None:
         Base.metadata.drop_all(self.engine)
         Base.metadata.create_all(self.engine)
+
+    def create_profile(
+        self,
+        *,
+        tenant_id: UUID,
+        name: str,
+    ) -> FactualProfile:
+        profile_id = uuid4()
+        now = utc_now()
+        with self.session() as session:
+            row = FactualProfileRow(
+                id=str(profile_id),
+                tenant_id=str(tenant_id),
+                name=name,
+                created_at=now,
+                updated_at=now,
+                version=1,
+            )
+            session.add(row)
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=profile_id,
+                action_id=None,
+                kind="profile.created",
+                payload={
+                    "profile_id": str(profile_id),
+                    "name_sha256": digest(name),
+                },
+            )
+            session.flush()
+            return self._profile(row)
+
+    def get_profile(self, tenant_id: UUID, profile_id: UUID) -> FactualProfile:
+        with self.session() as session:
+            return self._profile(self._profile_row(session, tenant_id, profile_id))
+
+    def list_profiles(self, tenant_id: UUID) -> list[FactualProfile]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(FactualProfileRow)
+                .where(FactualProfileRow.tenant_id == str(tenant_id))
+                .order_by(FactualProfileRow.created_at)
+            ).all()
+            return [self._profile(row) for row in rows]
+
+    def put_profile_answer(
+        self,
+        *,
+        tenant_id: UUID,
+        profile_id: UUID,
+        field_name: str,
+        value: str,
+        source: AnswerSource,
+        sensitivity: AnswerSensitivity,
+        verification_state: VerificationState,
+        expected_version: int | None,
+        actor_id: str,
+    ) -> ProfileAnswer:
+        now = utc_now()
+        with self.session() as session:
+            profile = self._locked_profile_row(session, tenant_id, profile_id)
+            row = session.scalar(
+                select(ProfileAnswerRow)
+                .where(
+                    ProfileAnswerRow.tenant_id == str(tenant_id),
+                    ProfileAnswerRow.profile_id == str(profile_id),
+                    ProfileAnswerRow.field_name == field_name,
+                )
+                .with_for_update()
+            )
+            verified = verification_state is VerificationState.VERIFIED
+            if row is None:
+                if expected_version is not None:
+                    raise ConflictError(
+                        "answer does not exist; omit expected_version when creating"
+                    )
+                row = ProfileAnswerRow(
+                    id=str(uuid4()),
+                    tenant_id=str(tenant_id),
+                    profile_id=str(profile_id),
+                    field_name=field_name,
+                    value=value,
+                    source_kind=source.kind.value,
+                    source_reference=source.reference,
+                    sensitivity=sensitivity.value,
+                    verification_state=verification_state.value,
+                    verified_by=actor_id if verified else None,
+                    verified_at=now if verified else None,
+                    created_at=now,
+                    updated_at=now,
+                    version=1,
+                )
+                session.add(row)
+                kind = "profile.answer_created"
+            else:
+                if expected_version is None:
+                    raise ConflictError(
+                        "expected_version is required when replacing an answer"
+                    )
+                if row.version != expected_version:
+                    raise ConflictError("answer version changed; reload before replacing")
+                row.value = value
+                row.source_kind = source.kind.value
+                row.source_reference = source.reference
+                row.sensitivity = sensitivity.value
+                row.verification_state = verification_state.value
+                row.verified_by = actor_id if verified else None
+                row.verified_at = now if verified else None
+                row.updated_at = now
+                row.version += 1
+                kind = "profile.answer_updated"
+            profile.updated_at = now
+            profile.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=profile_id,
+                action_id=None,
+                kind=kind,
+                payload={
+                    "profile_id": str(profile_id),
+                    "answer_id": row.id,
+                    "field_name_sha256": digest(field_name),
+                    "sensitivity": sensitivity.value,
+                    "verification_state": verification_state.value,
+                    "answer_version": row.version,
+                },
+            )
+            session.flush()
+            return self._profile_answer(row)
+
+    def list_profile_answers(
+        self,
+        tenant_id: UUID,
+        profile_id: UUID,
+    ) -> list[ProfileAnswer]:
+        with self.session() as session:
+            self._profile_row(session, tenant_id, profile_id)
+            rows = session.scalars(
+                select(ProfileAnswerRow)
+                .where(
+                    ProfileAnswerRow.tenant_id == str(tenant_id),
+                    ProfileAnswerRow.profile_id == str(profile_id),
+                )
+                .order_by(ProfileAnswerRow.field_name)
+            ).all()
+            return [self._profile_answer(row) for row in rows]
+
+    def profile_events(
+        self,
+        tenant_id: UUID,
+        profile_id: UUID,
+    ) -> list[AuditEvent]:
+        with self.session() as session:
+            self._profile_row(session, tenant_id, profile_id)
+            rows = session.scalars(
+                select(AuditEventRow)
+                .where(
+                    AuditEventRow.tenant_id == str(tenant_id),
+                    AuditEventRow.task_id == str(profile_id),
+                    AuditEventRow.kind.like("profile.%"),
+                )
+                .order_by(AuditEventRow.sequence)
+            ).all()
+            return [self._event(row) for row in rows]
 
     def create_task(
         self,
@@ -1112,6 +1328,38 @@ class DatabaseStore:
         )
 
     @staticmethod
+    def _profile(row: FactualProfileRow) -> FactualProfile:
+        return FactualProfile(
+            id=UUID(row.id),
+            tenant_id=UUID(row.tenant_id),
+            name=row.name,
+            created_at=_as_utc(row.created_at),
+            updated_at=_as_utc(row.updated_at),
+            version=row.version,
+        )
+
+    @staticmethod
+    def _profile_answer(row: ProfileAnswerRow) -> ProfileAnswer:
+        return ProfileAnswer(
+            id=UUID(row.id),
+            tenant_id=UUID(row.tenant_id),
+            profile_id=UUID(row.profile_id),
+            field_name=row.field_name,
+            value=row.value,
+            source=AnswerSource(
+                kind=AnswerSourceKind(row.source_kind),
+                reference=row.source_reference,
+            ),
+            sensitivity=AnswerSensitivity(row.sensitivity),
+            verification_state=VerificationState(row.verification_state),
+            verified_by=row.verified_by,
+            verified_at=_as_utc(row.verified_at) if row.verified_at else None,
+            created_at=_as_utc(row.created_at),
+            updated_at=_as_utc(row.updated_at),
+            version=row.version,
+        )
+
+    @staticmethod
     def _action(row: ActionRow) -> BrowserAction:
         return BrowserAction(
             id=UUID(row.id),
@@ -1192,6 +1440,40 @@ class DatabaseStore:
         )
         if row is None:
             raise NotFoundError("task not found")
+        return row
+
+    @staticmethod
+    def _profile_row(
+        session: Session,
+        tenant_id: UUID,
+        profile_id: UUID,
+    ) -> FactualProfileRow:
+        row = session.scalar(
+            select(FactualProfileRow).where(
+                FactualProfileRow.id == str(profile_id),
+                FactualProfileRow.tenant_id == str(tenant_id),
+            )
+        )
+        if row is None:
+            raise NotFoundError("profile not found")
+        return row
+
+    @staticmethod
+    def _locked_profile_row(
+        session: Session,
+        tenant_id: UUID,
+        profile_id: UUID,
+    ) -> FactualProfileRow:
+        row = session.scalar(
+            select(FactualProfileRow)
+            .where(
+                FactualProfileRow.id == str(profile_id),
+                FactualProfileRow.tenant_id == str(tenant_id),
+            )
+            .with_for_update()
+        )
+        if row is None:
+            raise NotFoundError("profile not found")
         return row
 
     @staticmethod
