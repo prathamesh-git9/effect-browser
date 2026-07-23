@@ -121,6 +121,33 @@ class ReconciliationSpec(DomainModel):
     receipt_test_id: str | None = None
 
 
+class ReviewField(DomainModel):
+    candidate_id: str
+    label: str
+    value: str
+    source_action_sha256: str | None = None
+
+
+class OutgoingReview(DomainModel):
+    fields: tuple[ReviewField, ...] = ()
+    document_sha256s: tuple[str, ...] = ()
+    observation_sha256: str
+    payload_sha256: str
+
+    @model_validator(mode="after")
+    def verify_payload_hash(self) -> OutgoingReview:
+        expected = digest(
+            {
+                "fields": [field.model_dump(mode="json") for field in self.fields],
+                "document_sha256s": list(self.document_sha256s),
+                "observation_sha256": self.observation_sha256,
+            }
+        )
+        if self.payload_sha256 != expected:
+            raise ValueError("outgoing review payload hash does not match its contents")
+        return self
+
+
 class ProposedAction(DomainModel):
     kind: ActionKind
     locator: Locator | None = None
@@ -133,6 +160,7 @@ class ProposedAction(DomainModel):
     planned_from_sha256: str | None = None
     target_interaction: str | None = None
     target_name: str | None = None
+    outgoing_review: OutgoingReview | None = None
 
     @model_validator(mode="after")
     def validate_shape(self) -> ProposedAction:
@@ -146,6 +174,8 @@ class ProposedAction(DomainModel):
         if self.kind is ActionKind.SUBMIT:
             if not self.effect_key or not self.expected_outcome:
                 raise ValueError("submit requires effect_key and expected_outcome")
+        elif self.outgoing_review is not None:
+            raise ValueError("outgoing review is valid only for submit actions")
         return self
 
     def action_hash(self) -> str:
@@ -175,6 +205,7 @@ class ElementCandidate(DomainModel):
     required: bool = False
     disabled: bool = False
     filled: bool = False
+    current_value: str | None = None
     href: str | None = None
     options: tuple[str, ...] = ()
     interaction: str

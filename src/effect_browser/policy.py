@@ -85,6 +85,24 @@ class ActionPolicy:
                 ),
             )
         if action.kind is ActionKind.SUBMIT:
+            if action.planned_from_sha256 and action.outgoing_review is None:
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=False,
+                    reason="reactive submit is missing its outgoing payload review",
+                )
+            if (
+                action.outgoing_review
+                and action.outgoing_review.observation_sha256
+                != action.planned_from_sha256
+            ):
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=False,
+                    reason="outgoing payload review is not bound to the planned page",
+                )
             return PolicyDecision(
                 allowed=True,
                 risk=RiskClass.EXTERNAL_COMMIT,

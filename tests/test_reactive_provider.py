@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from effect_browser.browser.snapshot import ScraplingSnapshotter
-from effect_browser.domain import ActionKind, StepChoice
+from effect_browser.domain import ActionKind, Locator, ProposedAction, StepChoice
 from effect_browser.providers.reactive import bind_choice
 
 
@@ -41,6 +41,15 @@ def test_step_choice_is_bound_to_fresh_candidate_and_receipt_contract(
         ),
         snapshot,
         effect_reference="EB-12345678",
+        prior_actions=(
+            ProposedAction(
+                kind=ActionKind.FILL,
+                locator=Locator(label="Email"),
+                value="candidate@example.test",
+                description="Fill verified email.",
+                target_name="Email",
+            ),
+        ),
     )
 
     assert proposal.locator == submit.locator
@@ -48,6 +57,10 @@ def test_step_choice_is_bound_to_fresh_candidate_and_receipt_contract(
     assert proposal.effect_key == "EB-12345678"
     assert proposal.reconciliation is not None
     assert proposal.reconciliation.url.endswith("/receipt?ref=EB-12345678")
+    assert proposal.outgoing_review is not None
+    assert proposal.outgoing_review.fields[0].label == "Email"
+    assert proposal.outgoing_review.fields[0].value == ""
+    assert proposal.outgoing_review.observation_sha256 == snapshot.state_sha256
 
 
 def test_step_choice_cannot_invent_candidate(tmp_path: Path) -> None:

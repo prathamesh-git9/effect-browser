@@ -163,6 +163,11 @@ class EffectBrowserService:
                             choice,
                             snapshot,
                             effect_reference=request.effect_reference,
+                            prior_actions=tuple(
+                                item.proposal
+                                for item in history
+                                if item.state is ActionState.SUCCEEDED
+                            ),
                         ),
                     )
                     task = self.store.get_task(tenant_id, task_id)

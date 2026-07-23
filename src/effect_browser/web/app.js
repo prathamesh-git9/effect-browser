@@ -24,6 +24,26 @@ function short(value, size = 12) {
   return value ? `${value.slice(0, size)}...` : "-";
 }
 
+function renderOutgoingReview(review) {
+  if (!review) return "";
+  const fields = review.fields.length
+    ? `<table class="review-table"><thead><tr><th>Observed field</th><th>Live value</th></tr></thead>
+      <tbody>${review.fields.map((field) => `<tr><td>${escapeHtml(field.label)}</td>
+      <td>${escapeHtml(field.value)}</td></tr>`).join("")}</tbody></table>`
+    : '<p class="empty">No text fields are included in this commit.</p>';
+  const documents = review.document_sha256s.length
+    ? `<p><strong>Document SHA-256:</strong><br>${review.document_sha256s
+      .map((value) => `<code>${escapeHtml(value)}</code>`).join("<br>")}</p>`
+    : "";
+  return `<section class="outgoing-review"><p class="kicker">OBSERVED LIVE FORM VALUES</p>
+    ${fields}${documents}
+    <p><strong>Observed DOM SHA-256:</strong><br>
+    <code title="${escapeHtml(review.observation_sha256)}">${escapeHtml(review.observation_sha256)}</code></p>
+    <p><strong>Payload SHA-256:</strong><br>
+    <code title="${escapeHtml(review.payload_sha256)}">${escapeHtml(review.payload_sha256)}</code></p>
+    </section>`;
+}
+
 function toast(message) {
   const node = $("#toast");
   node.textContent = message;
@@ -100,6 +120,7 @@ function renderGate(action) {
       <p><strong>Expected:</strong> ${escapeHtml(action.proposal.expected_outcome)}<br>
       <strong>Effect key:</strong> ${escapeHtml(action.proposal.effect_key)}<br>
       <strong>Observed URL:</strong> ${escapeHtml(action.observation_url)}</p>
+      ${renderOutgoingReview(action.proposal.outgoing_review)}
       <div class="gate-actions"><button class="primary" id="approve">Approve exact commit</button>
       <button class="primary danger" id="reject">Reject</button></div>`;
     $("#approve").addEventListener("click", (event) => mutate(

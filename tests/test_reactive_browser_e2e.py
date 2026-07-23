@@ -102,6 +102,8 @@ def prepare_reactive_task(base_url: str, start_url: str | None = None):
     assert submit.proposal.kind is ActionKind.SUBMIT
     assert submit.state is ActionState.APPROVAL_REQUIRED
     assert submit.proposal.reconciliation is not None
+    assert submit.proposal.outgoing_review is not None
+    assert len(submit.proposal.outgoing_review.fields) == 8
     service.store.approve_action(
         tenant_id=settings.default_tenant_id,
         action_id=submit.id,

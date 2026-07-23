@@ -39,6 +39,7 @@ def test_scrapling_extracts_candidate_bound_dynamic_controls(tmp_path: Path) -> 
     country, continue_button, submit, privacy = snapshot.candidates
     assert country.options == (" | Choose", "IE | Ireland")
     assert country.required is True
+    assert country.current_value == ""
     assert continue_button.interaction == "ambiguous"
     assert submit.interaction == "commit"
     assert privacy.interaction == "navigation"

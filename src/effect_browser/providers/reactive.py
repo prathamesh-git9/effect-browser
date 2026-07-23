@@ -4,11 +4,14 @@ from urllib.parse import quote, urljoin
 
 from effect_browser.domain import (
     ActionKind,
+    OutgoingReview,
     PageSnapshot,
     PlanRequest,
     ProposedAction,
     ReconciliationSpec,
+    ReviewField,
     StepChoice,
+    digest,
 )
 
 
@@ -33,6 +36,7 @@ def bind_choice(
     snapshot: PageSnapshot,
     *,
     effect_reference: str,
+    prior_actions: tuple[ProposedAction, ...] = (),
 ) -> ProposedAction:
     if choice.kind is ActionKind.NAVIGATE:
         return ProposedAction(
@@ -62,6 +66,7 @@ def bind_choice(
     if choice.kind is ActionKind.SUBMIT and candidate.interaction != "commit":
         raise ValueError("submit choice must target a commit candidate")
     reconciliation = None
+    outgoing_review = None
     if choice.kind is ActionKind.SUBMIT and snapshot.submission_contract:
         contract = snapshot.submission_contract
         encoded_reference = quote(effect_reference, safe="")
@@ -76,6 +81,40 @@ def bind_choice(
             external_reference=effect_reference,
             receipt_test_id=contract.receipt_test_id,
         )
+    if choice.kind is ActionKind.SUBMIT:
+        latest_fill_by_name = {
+            action.target_name: action
+            for action in prior_actions
+            if action.kind is ActionKind.FILL and action.target_name is not None
+        }
+        fields = tuple(
+            ReviewField(
+                candidate_id=candidate.id,
+                label=candidate.name,
+                value=candidate.current_value,
+                source_action_sha256=(
+                    source.action_hash()
+                    if (
+                        (source := latest_fill_by_name.get(candidate.name)) is not None
+                        and source.value == candidate.current_value
+                    )
+                    else None
+                ),
+            )
+            for candidate in snapshot.candidates
+            if candidate.interaction == "input" and candidate.current_value is not None
+        )
+        review_body = {
+            "fields": [field.model_dump(mode="json") for field in fields],
+            "document_sha256s": [],
+            "observation_sha256": snapshot.state_sha256,
+        }
+        outgoing_review = OutgoingReview(
+            fields=fields,
+            document_sha256s=(),
+            observation_sha256=snapshot.state_sha256,
+            payload_sha256=digest(review_body),
+        )
     return ProposedAction(
         kind=choice.kind,
         locator=candidate.locator,
@@ -89,4 +128,5 @@ def bind_choice(
         planned_from_sha256=snapshot.state_sha256,
         target_interaction=candidate.interaction,
         target_name=candidate.name,
+        outgoing_review=outgoing_review,
     )

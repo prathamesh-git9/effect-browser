@@ -69,6 +69,10 @@ class ScraplingSnapshotter:
                 f"{self._clean(option.get_all_text(separator=' ', strip=True))}"
                 for option in element.css("option")
             )
+            interaction = self._interaction(element, name, href)
+            current_value = (
+                str(element.attrib.get("value", "")) if interaction == "input" else None
+            )
             candidates.append(
                 ElementCandidate(
                     id=f"C{len(candidates) + 1:03d}",
@@ -78,9 +82,11 @@ class ScraplingSnapshotter:
                     input_type=input_type,
                     required="required" in element.attrib,
                     disabled="disabled" in element.attrib,
+                    filled=bool(current_value),
+                    current_value=current_value,
                     href=href,
                     options=options,
-                    interaction=self._interaction(element, name, href),
+                    interaction=interaction,
                     locator=Locator(
                         selector=selector,
                         adaptive_id=adaptive_id,

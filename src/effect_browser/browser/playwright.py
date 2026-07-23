@@ -108,12 +108,19 @@ class PlaywrightDriver:
             target = self._page.locator(candidate.locator.selector or "")
             if target.count() == 1 and target.is_visible():
                 filled = False
+                current_value = None
                 if candidate.interaction == "input":
                     try:
-                        filled = bool(target.input_value().strip())
+                        current_value = target.input_value()
+                        filled = bool(current_value.strip())
                     except PlaywrightTimeoutError:
                         filled = False
-                visible.append(candidate.model_copy(update={"filled": filled}))
+                        current_value = None
+                visible.append(
+                    candidate.model_copy(
+                        update={"filled": filled, "current_value": current_value}
+                    )
+                )
         return snapshot.model_copy(update={"candidates": tuple(visible)})
 
     def execute(self, action: ProposedAction) -> BrowserReceipt:
