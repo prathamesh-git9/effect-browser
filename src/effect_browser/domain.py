@@ -430,6 +430,10 @@ class Approval(DomainModel):
     actor_id: str
     action_sha256: str
     observation_sha256: str
+    payload_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     decided_at: datetime
 
 

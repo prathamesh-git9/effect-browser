@@ -8,9 +8,10 @@ tenant/actor identity in an authenticated reverse proxy. The built-in identity h
 are not an authentication mechanism.
 
 Use PostgreSQL for more than one worker. SQLite is suitable for the local demo and a
-single operator process. Run `effect-browser init` once against a new database. Version
-0.1 creates its initial schema directly; it does not claim a zero-downtime migration
-path from prerelease databases.
+single operator process. Run `effect-browser init` once against a new database. Startup
+applies the release's additive approval-hash migration without deleting task history.
+Back up the database before upgrading; destructive and type-changing migrations are
+deliberately unsupported.
 
 Persist the database and Playwright artifact directory. Browser traces and screenshots
 may contain sensitive page data, so apply retention, encryption, and access controls

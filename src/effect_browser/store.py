@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     create_engine,
+    inspect,
     or_,
     select,
     update,
@@ -105,6 +106,7 @@ class ApprovalRow(Base):
     actor_id: Mapped[str] = mapped_column(String(200))
     action_sha256: Mapped[str] = mapped_column(String(64))
     observation_sha256: Mapped[str] = mapped_column(String(64))
+    payload_sha256: Mapped[str | None] = mapped_column(String(64))
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
@@ -240,6 +242,54 @@ class DatabaseStore:
 
     def initialize(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._apply_additive_migrations()
+
+    def _apply_additive_migrations(self) -> None:
+        """Upgrade schemas created by earlier releases without deleting data."""
+        inspector = inspect(self.engine)
+        if "approvals" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("approvals")}
+        if "payload_sha256" not in columns:
+            if self.engine.dialect.name == "postgresql":
+                statement = (
+                    "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS "
+                    "payload_sha256 VARCHAR(64)"
+                )
+            else:
+                # SQLite is supported for one operator process only.
+                statement = "ALTER TABLE approvals ADD COLUMN payload_sha256 VARCHAR(64)"
+            with self.engine.begin() as connection:
+                connection.exec_driver_sql(statement)
+        self._backfill_payload_approval_hashes()
+
+    def _backfill_payload_approval_hashes(self) -> None:
+        """Recover explicit hashes already covered by valid legacy action hashes."""
+        with self.engine.begin() as connection:
+            legacy_rows = connection.execute(
+                select(
+                    ApprovalRow.id,
+                    ApprovalRow.action_sha256,
+                    ActionRow.action_sha256,
+                    ActionRow.proposal,
+                )
+                .join(ActionRow, ApprovalRow.action_id == ActionRow.id)
+                .where(ApprovalRow.payload_sha256.is_(None))
+            ).all()
+            for approval_id, approved_hash, action_hash, raw_proposal in legacy_rows:
+                if approved_hash != action_hash:
+                    continue
+                try:
+                    proposal = ProposedAction.model_validate(raw_proposal)
+                except ValueError:
+                    continue
+                if proposal.outgoing_review is None:
+                    continue
+                connection.execute(
+                    update(ApprovalRow)
+                    .where(ApprovalRow.id == approval_id)
+                    .values(payload_sha256=proposal.outgoing_review.payload_sha256)
+                )
 
     def close(self) -> None:
         self.engine.dispose()
@@ -749,6 +799,12 @@ class DatabaseStore:
                 raise ConflictError("action is not awaiting approval")
             if not row.observation_sha256:
                 raise ConflictError("action has no bound observation")
+            proposal = ProposedAction.model_validate(row.proposal)
+            payload_sha256 = (
+                proposal.outgoing_review.payload_sha256
+                if proposal.outgoing_review is not None
+                else None
+            )
             approval = ApprovalRow(
                 id=str(uuid4()),
                 tenant_id=str(tenant_id),
@@ -757,6 +813,7 @@ class DatabaseStore:
                 actor_id=actor_id,
                 action_sha256=row.action_sha256,
                 observation_sha256=row.observation_sha256,
+                payload_sha256=payload_sha256,
                 decided_at=utc_now(),
             )
             session.add(approval)
@@ -776,6 +833,7 @@ class DatabaseStore:
                     "actor_id": actor_id,
                     "action_sha256": row.action_sha256,
                     "observation_sha256": row.observation_sha256,
+                    "payload_sha256": payload_sha256,
                 },
             )
             session.flush()
@@ -795,6 +853,12 @@ class DatabaseStore:
                 raise ConflictError("action version changed; reload before rejecting")
             if ActionState(row.state) is not ActionState.APPROVAL_REQUIRED:
                 raise ConflictError("action is not awaiting approval")
+            proposal = ProposedAction.model_validate(row.proposal)
+            payload_sha256 = (
+                proposal.outgoing_review.payload_sha256
+                if proposal.outgoing_review is not None
+                else None
+            )
             session.add(
                 ApprovalRow(
                     id=str(uuid4()),
@@ -804,6 +868,7 @@ class DatabaseStore:
                     actor_id=actor_id,
                     action_sha256=row.action_sha256,
                     observation_sha256=row.observation_sha256 or "",
+                    payload_sha256=payload_sha256,
                     decided_at=utc_now(),
                 )
             )
@@ -819,7 +884,12 @@ class DatabaseStore:
                 task_id=UUID(row.task_id),
                 action_id=action_id,
                 kind="action.rejected",
-                payload={"actor_id": actor_id, "action_sha256": row.action_sha256},
+                payload={
+                    "actor_id": actor_id,
+                    "action_sha256": row.action_sha256,
+                    "observation_sha256": row.observation_sha256,
+                    "payload_sha256": payload_sha256,
+                },
             )
             session.flush()
             return self._action(row)
@@ -862,6 +932,33 @@ class DatabaseStore:
             row = self._locked_action_row(session, tenant_id, action_id)
             if ActionState(row.state) is not ActionState.PREPARED:
                 raise ConflictError("only a prepared action can dispatch")
+            proposal = ProposedAction.model_validate(row.proposal)
+            if proposal.action_hash() != row.action_sha256:
+                raise ConflictError("stored action no longer matches its bound hash")
+            if RiskClass(row.risk) is RiskClass.EXTERNAL_COMMIT:
+                approval = session.scalar(
+                    select(ApprovalRow)
+                    .where(
+                        ApprovalRow.tenant_id == str(tenant_id),
+                        ApprovalRow.action_id == row.id,
+                        ApprovalRow.decision == ApprovalDecision.APPROVED.value,
+                    )
+                    .order_by(ApprovalRow.decided_at.desc())
+                )
+                expected_payload_sha256 = (
+                    proposal.outgoing_review.payload_sha256
+                    if proposal.outgoing_review is not None
+                    else None
+                )
+                if (
+                    approval is None
+                    or approval.action_sha256 != row.action_sha256
+                    or approval.observation_sha256 != row.observation_sha256
+                    or approval.payload_sha256 != expected_payload_sha256
+                ):
+                    raise ConflictError(
+                        "external commit lacks exact action, payload, or page approval"
+                    )
             row.state = ActionState.DISPATCHING.value
             row.version += 1
             task = self._task_row(session, tenant_id, UUID(row.task_id))
@@ -876,7 +973,12 @@ class DatabaseStore:
                 kind="action.dispatching",
                 payload={
                     "action_sha256": row.action_sha256,
-                    "effect_key": ProposedAction.model_validate(row.proposal).effect_key,
+                    "effect_key": proposal.effect_key,
+                    "payload_sha256": (
+                        proposal.outgoing_review.payload_sha256
+                        if proposal.outgoing_review is not None
+                        else None
+                    ),
                 },
             )
             session.flush()
@@ -1386,6 +1488,7 @@ class DatabaseStore:
             actor_id=row.actor_id,
             action_sha256=row.action_sha256,
             observation_sha256=row.observation_sha256,
+            payload_sha256=row.payload_sha256,
             decided_at=_as_utc(row.decided_at),
         )
 

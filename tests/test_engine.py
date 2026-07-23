@@ -11,8 +11,14 @@ from effect_browser.domain import (
     ActionState,
     BrowserAction,
     Locator,
+    Observation,
+    OutgoingReview,
+    PolicyDecision,
     ProposedAction,
+    RiskClass,
     TaskStatus,
+    digest,
+    utc_now,
 )
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner
@@ -160,6 +166,98 @@ def test_stale_approval_version_is_rejected(service) -> None:
             expected_version=action.version - 1,
             actor_id="stale-operator",
         )
+
+
+def test_payload_approval_is_persisted_and_rechecked_before_dispatch(service) -> None:
+    observation_sha256 = "a" * 64
+    review_body = {
+        "fields": [],
+        "document_sha256s": [],
+        "observation_sha256": observation_sha256,
+    }
+    review = OutgoingReview(
+        observation_sha256=observation_sha256,
+        payload_sha256=digest(review_body),
+    )
+
+    class ReviewedSubmitPlanner:
+        name = "reviewed-submit"
+
+        def plan(self, _request):
+            return (
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Submit application"),
+                    description="Submit the exact reviewed payload.",
+                    effect_key="REVIEWED-PAYLOAD",
+                    expected_outcome="One reviewed application.",
+                    planned_from_sha256=observation_sha256,
+                    outgoing_review=review,
+                ),
+            )
+
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Bind approval to the reviewed payload.",
+        start_url=BASE_URL,
+        planner=ReviewedSubmitPlanner(),
+    )
+    action = service.store.current_action(TENANT, task.id)
+    assert action is not None
+    prepared = service.store.prepare_action(
+        TENANT,
+        action.id,
+        Observation(
+            url=BASE_URL,
+            title="Synthetic review",
+            state_sha256=observation_sha256,
+            captured_at=utc_now(),
+        ),
+        PolicyDecision(
+            allowed=True,
+            risk=RiskClass.EXTERNAL_COMMIT,
+            requires_approval=True,
+            reason="reviewed payload requires approval",
+        ),
+    )
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=prepared.id,
+        expected_version=prepared.version,
+        actor_id="test-operator",
+    )
+
+    approval = service.store.latest_approval(TENANT, action.id)
+    assert approval is not None
+    assert approval.action_sha256 == action.action_sha256
+    assert approval.observation_sha256 == observation_sha256
+    assert approval.payload_sha256 == review.payload_sha256
+    approved_event = service.store.events(TENANT, task.id)[-1]
+    assert approved_event.payload["payload_sha256"] == review.payload_sha256
+
+    with service.store.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE approvals SET payload_sha256=:forged WHERE action_id=:action_id"
+            ),
+            {"forged": "f" * 64, "action_id": str(action.id)},
+        )
+
+    with pytest.raises(ConflictError, match="exact action, payload, or page"):
+        service.store.start_dispatch(TENANT, action.id)
+
+
+def test_dispatch_recomputes_the_stored_action_hash(service) -> None:
+    remote = RemoteSystem()
+    _task, action = prepare_and_approve(service, remote)
+    with service.store.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE actions SET action_sha256=:forged WHERE id=:action_id"),
+            {"forged": "f" * 64, "action_id": str(action.id)},
+        )
+
+    with pytest.raises(ConflictError, match="stored action no longer matches"):
+        service.store.start_dispatch(TENANT, action.id)
 
 
 def test_disallowed_origin_fails_closed(service) -> None:
