@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Crash-safe commit control for browser automation.">
+  <title>Effect Browser</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/">Effect Browser <span>CONTROL PLANE</span></a>
+    <nav><a href="/demo-shop" target="_blank">Demo portal</a><a href="/docs">API</a></nav>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <p class="kicker">DURABLE BROWSER EFFECTS / V0.1</p>
+        <h1>The model may click.<br><em>The ledger decides.</em></h1>
+        <p class="intro">A stronger model still cannot know whether a remote submit
+          committed before its process died. Effect Browser records the boundary,
+          refuses a blind retry, and reconciles the receipt.</p>
+      </div>
+      <div class="proof"><span id="audit-light"></span><strong id="audit-state">Checking ledger</strong><small id="audit-detail">Tamper-evident SHA-256 chain</small></div>
+    </section>
+
+    <section class="grid">
+      <aside class="rail panel">
+        <div class="panel-head"><div><p class="kicker">TASK QUEUE</p><h2>Operations</h2></div><button class="icon" id="refresh" aria-label="Refresh">&#8635;</button></div>
+        <form id="create-form">
+          <label>Instruction<textarea id="instruction" rows="4" required>Order three encrypted backup drives without a duplicate order.</textarea></label>
+          <label>Start URL<input id="start-url" value="http://127.0.0.1:8000" required></label>
+          <label>Planner<select id="provider"><option value="deterministic">Deterministic demo</option><option value="openai">OpenAI</option><option value="grok">Grok</option></select></label>
+          <button class="primary" type="submit">Create durable task</button>
+        </form>
+        <div class="divider"></div>
+        <div id="tasks" class="tasks"><p class="empty">No operations yet.</p></div>
+      </aside>
+
+      <section class="workspace panel">
+        <div id="empty-state" class="empty-state">
+          <div class="seal">EB</div><h2>No operation selected</h2><p>Create a task to inspect every prepared action, approval binding, receipt, and recovery decision.</p>
+        </div>
+        <div id="task-view" hidden>
+          <div class="panel-head task-heading"><div><p class="kicker" id="task-id"></p><h2 id="task-title"></h2></div><span class="status" id="task-status"></span></div>
+          <div class="commandbar"><button class="primary" id="run-task">Run / resume</button><span id="run-note">Safe actions run until a hard gate.</span></div>
+          <section id="gate"></section>
+          <div class="section-head"><p class="kicker">DURABLE JOURNAL</p><span id="action-count"></span></div>
+          <div id="actions" class="timeline"></div>
+          <details><summary>Audit events</summary><div id="events" class="events"></div></details>
+        </div>
+      </section>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

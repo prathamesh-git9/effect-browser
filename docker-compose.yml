@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: effect_browser
+      POSTGRES_USER: effect_browser
+      POSTGRES_PASSWORD: effect_browser_local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U effect_browser -d effect_browser"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - effect-browser-postgres:/var/lib/postgresql/data
+
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      EFFECT_BROWSER_DATABASE_URL: postgresql+psycopg://effect_browser:effect_browser_local@db:5432/effect_browser
+      EFFECT_BROWSER_ALLOWED_ORIGINS: http://app:8000,http://127.0.0.1:8000,http://localhost:8000
+    depends_on:
+      db:
+        condition: service_healthy
+    shm_size: 1gb
+
+volumes:
+  effect-browser-postgres:
