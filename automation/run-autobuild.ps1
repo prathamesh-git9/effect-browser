@@ -32,12 +32,18 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to inspect the automation worktree"
     }
-    if ($dirty) {
-        throw "Automation worktree is dirty; refusing to overlap unfinished work"
-    }
-
     $promptPath = Join-Path $resolvedWorktree "automation\autobuild.prompt.md"
     $prompt = Get-Content -Raw -LiteralPath $promptPath
+    if ($dirty) {
+        $prompt = @"
+The dedicated automation worktree already contains unfinished changes from a
+previous scheduled run. Inspect the diff before editing. Continue only the
+same clearly identifiable roadmap slice, preserve all valid work, and never
+reset, clean, or discard those changes.
+
+$prompt
+"@
+    }
     $logDirectory = Join-Path $resolvedWorktree "artifacts\automation"
     New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
