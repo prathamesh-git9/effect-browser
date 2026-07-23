@@ -39,6 +39,19 @@ effect-browser serve
 Open <http://127.0.0.1:8000>. Use the deterministic provider and bundled demo shop with
 no API keys.
 
+The bundled dynamic job harness is at <http://127.0.0.1:8000/demo-jobs>. It uses
+asynchronous form hydration, a conditional question, server-side validation, an
+authoritative application ledger, and a deliberately deceptive fake-success mode. Run:
+
+```powershell
+pytest tests/test_job_harness_e2e.py
+```
+
+The honest test result is documented in
+[docs/JOB_APPLICATION_HARNESS.md](docs/JOB_APPLICATION_HARNESS.md). The deterministic
+workflow adapter passes; the current one-shot OpenAI planner does **not** generalize to
+an unfamiliar job page because it does not observe the DOM before planning.
+
 Run the durable polling worker separately when tasks should progress without an open
 dashboard. It auto-runs only queued safe work and still stops at approval and recovery
 gates:

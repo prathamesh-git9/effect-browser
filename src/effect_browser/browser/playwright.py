@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_playwright
 from playwright.sync_api import Locator as PWLocator
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from effect_browser.domain import (
     ActionKind,
@@ -47,6 +48,12 @@ class PlaywrightDriver:
         self._page: Page = self._context.new_page()
 
     def observe(self) -> Observation:
+        try:
+            self._page.wait_for_load_state("networkidle", timeout=3_000)
+        except PlaywrightTimeoutError:
+            # Long-polling pages may never become idle. The state hash still protects
+            # execution: later drift invalidates the action instead of weakening safety.
+            pass
         title = self._page.title()
         url = self._page.url
         body = self._page.locator("body").inner_text() if url != "about:blank" else ""
@@ -90,17 +97,30 @@ class PlaywrightDriver:
                 target.fill(action.value or "")
         elif action.kind in {ActionKind.CLICK, ActionKind.SUBMIT}:
             self._locator(action).click()
-            self._page.wait_for_load_state("domcontentloaded")
+            wait_state = (
+                "networkidle" if action.kind is ActionKind.SUBMIT else "domcontentloaded"
+            )
+            self._page.wait_for_load_state(wait_state, timeout=10_000)
         else:
             raise ValueError(f"unsupported browser action: {action.kind.value}")
         return self._receipt(action.effect_key or f"local-{action.kind.value}")
 
     def reconcile(self, spec: ReconciliationSpec) -> BrowserReceipt | None:
         self._page.goto(spec.url, wait_until="domcontentloaded")
-        matches = self._page.get_by_text(spec.expected_text, exact=False)
+        matches = (
+            self._page.get_by_test_id(spec.receipt_test_id)
+            if spec.receipt_test_id
+            else self._page.get_by_text(spec.expected_text, exact=False)
+        )
         if matches.count() == 0:
             return None
-        return self._receipt(spec.external_reference)
+        text = matches.first.inner_text()
+        if spec.expected_text not in text:
+            return None
+        external_id = (
+            matches.first.get_attribute("data-external-id") or spec.external_reference
+        )
+        return self._receipt(external_id)
 
     def close(self) -> None:
         trace = self.artifacts_directory / f"{self.session_id}-trace.zip"

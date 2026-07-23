@@ -9,3 +9,7 @@ class Planner(Protocol):
     name: str
 
     def plan(self, request: PlanRequest) -> tuple[ProposedAction, ...]: ...
+
+
+class ProviderError(RuntimeError):
+    """A planner provider rejected or failed to produce a plan."""

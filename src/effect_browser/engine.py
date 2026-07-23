@@ -200,6 +200,40 @@ class EffectBrowserService:
             self.store.start_dispatch(tenant_id, action.id)
             try:
                 receipt = self._execute(action.proposal, driver)
+                if action.proposal.kind is ActionKind.SUBMIT:
+                    spec = action.proposal.reconciliation
+                    if spec is None:
+                        unknown = self.store.mark_outcome_unknown(
+                            tenant_id,
+                            action.id,
+                            (
+                                "submit returned UI state but has no independent "
+                                "receipt lookup"
+                            ),
+                        )
+                        return RunResult(
+                            task=self.store.get_task(tenant_id, task_id),
+                            next_action=unknown,
+                            message=(
+                                "submit is unverified; visible success is not accepted "
+                                "as proof"
+                            ),
+                        )
+                    receipt = driver.reconcile(spec)
+                    if receipt is None:
+                        unknown = self.store.mark_outcome_unknown(
+                            tenant_id,
+                            action.id,
+                            "submit UI completed but authoritative receipt was not found",
+                        )
+                        return RunResult(
+                            task=self.store.get_task(tenant_id, task_id),
+                            next_action=unknown,
+                            message=(
+                                "submit is unverified; authoritative receipt was not "
+                                "found"
+                            ),
+                        )
             except Exception as exc:
                 if action.proposal.kind is ActionKind.SUBMIT:
                     unknown = self.store.mark_outcome_unknown(

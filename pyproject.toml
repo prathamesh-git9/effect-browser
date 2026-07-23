@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "effect-browser"
-version = "0.1.0"
+version = "0.2.0"
 description = "Crash-safe browser operations with approval-bound external effects."
 readme = "README.md"
 license = { text = "MIT" }

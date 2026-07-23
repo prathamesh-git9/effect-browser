@@ -54,6 +54,7 @@ class DeterministicPlanner:
                     url=reconcile_url,
                     expected_text=reference,
                     external_reference=reference,
+                    receipt_test_id="receipt",
                 ),
             ),
             ProposedAction(

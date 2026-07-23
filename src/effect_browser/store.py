@@ -151,6 +151,23 @@ class DemoOrderRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class DemoJobApplicationRow(Base):
+    __tablename__ = "demo_job_applications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    reference: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    job_slug: Mapped[str] = mapped_column(String(120), index=True)
+    full_name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str] = mapped_column(String(320))
+    country: Mapped[str] = mapped_column(String(100))
+    work_authorization: Mapped[str] = mapped_column(String(100))
+    years_python: Mapped[int] = mapped_column(Integer)
+    resume_summary: Mapped[str] = mapped_column(Text)
+    cover_note: Mapped[str] = mapped_column(Text)
+    duplicate_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class StoreError(RuntimeError):
     pass
 
@@ -883,6 +900,62 @@ class DatabaseStore:
                 for row in rows
             ]
 
+    def create_demo_job_application(
+        self,
+        *,
+        reference: str,
+        job_slug: str,
+        full_name: str,
+        email: str,
+        country: str,
+        work_authorization: str,
+        years_python: int,
+        resume_summary: str,
+        cover_note: str,
+    ) -> tuple[str, bool]:
+        with self.session() as session:
+            existing = session.scalar(
+                select(DemoJobApplicationRow).where(
+                    DemoJobApplicationRow.reference == reference
+                )
+            )
+            if existing:
+                existing.duplicate_attempts += 1
+                return existing.id, False
+            row = DemoJobApplicationRow(
+                id=str(uuid4()),
+                reference=reference,
+                job_slug=job_slug,
+                full_name=full_name,
+                email=email,
+                country=country,
+                work_authorization=work_authorization,
+                years_python=years_python,
+                resume_summary=resume_summary,
+                cover_note=cover_note,
+                duplicate_attempts=0,
+                created_at=utc_now(),
+            )
+            session.add(row)
+            session.flush()
+            return row.id, True
+
+    def demo_job_application(self, reference: str) -> dict[str, Any] | None:
+        with self.session() as session:
+            row = session.scalar(
+                select(DemoJobApplicationRow).where(
+                    DemoJobApplicationRow.reference == reference
+                )
+            )
+            return self._demo_job_application(row) if row else None
+
+    def demo_job_applications(self) -> list[dict[str, Any]]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(DemoJobApplicationRow).order_by(DemoJobApplicationRow.created_at)
+            ).all()
+            return [self._demo_job_application(row) for row in rows]
+
     def _append_event(
         self,
         session: Session,
@@ -1034,6 +1107,23 @@ class DatabaseStore:
             previous_hash=row.previous_hash,
             event_hash=row.event_hash,
         )
+
+    @staticmethod
+    def _demo_job_application(row: DemoJobApplicationRow) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "reference": row.reference,
+            "job_slug": row.job_slug,
+            "full_name": row.full_name,
+            "email": row.email,
+            "country": row.country,
+            "work_authorization": row.work_authorization,
+            "years_python": row.years_python,
+            "resume_summary": row.resume_summary,
+            "cover_note": row.cover_note,
+            "duplicate_attempts": row.duplicate_attempts,
+            "created_at": _as_utc(row.created_at).isoformat(),
+        }
 
     @staticmethod
     def _task_row(session: Session, tenant_id: UUID, task_id: UUID) -> TaskRow:

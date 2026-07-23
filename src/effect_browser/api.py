@@ -20,8 +20,15 @@ from effect_browser.config import get_settings
 from effect_browser.demo_target import create_demo_router
 from effect_browser.domain import BrowserReceipt, Resolution
 from effect_browser.engine import EffectBrowserService
+from effect_browser.job_target import create_demo_job_router
 from effect_browser.policy import ActionPolicy
-from effect_browser.providers import DeterministicPlanner, GrokPlanner, OpenAIPlanner
+from effect_browser.providers import (
+    DeterministicPlanner,
+    GrokPlanner,
+    JobHarnessPlanner,
+    OpenAIPlanner,
+    ProviderError,
+)
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 
 REQUESTS = Counter(
@@ -72,11 +79,12 @@ def planner(name: str):
     settings = get_settings()
     planners = {
         "deterministic": DeterministicPlanner(),
+        "job-harness": JobHarnessPlanner(),
         "openai": OpenAIPlanner(settings.openai_model),
         "grok": GrokPlanner(settings.grok_model),
     }
     if name not in planners:
-        raise ValueError("provider must be deterministic, openai, or grok")
+        raise ValueError("provider must be deterministic, job-harness, openai, or grok")
     return planners[name]
 
 
@@ -110,7 +118,7 @@ class ResolutionBody(BaseModel):
 
 app = FastAPI(
     title="Effect Browser",
-    version="0.1.0",
+    version="0.2.0",
     description="Crash-safe browser operations with honest effect semantics.",
     lifespan=lifespan,
 )
@@ -159,6 +167,11 @@ async def conflict(_request: Request, exc: ConflictError):
 @app.exception_handler(ValueError)
 async def invalid(_request: Request, exc: ValueError):
     return _error(422, "validation_error", str(exc))
+
+
+@app.exception_handler(ProviderError)
+async def provider_failure(_request: Request, exc: ProviderError):
+    return _error(502, "provider_error", str(exc))
 
 
 def _error(status: int, code: str, detail: str) -> JSONResponse:
@@ -339,6 +352,7 @@ def verify_audit(
 
 
 app.include_router(create_demo_router(get_store))
+app.include_router(create_demo_job_router(get_store))
 
 web_dir = Path(__file__).parent / "web"
 app.mount("/assets", StaticFiles(directory=web_dir), name="assets")

@@ -11,7 +11,7 @@
   <div class="grain" aria-hidden="true"></div>
   <header class="topbar">
     <a class="brand" href="/">Effect Browser <span>CONTROL PLANE</span></a>
-    <nav><a href="/demo-shop" target="_blank">Demo portal</a><a href="/docs">API</a></nav>
+    <nav><a href="/demo-shop" target="_blank">Order demo</a><a href="/demo-jobs" target="_blank">Job harness</a><a href="/docs">API</a></nav>
   </header>
   <main>
     <section class="hero">
@@ -31,7 +31,7 @@
         <form id="create-form">
           <label>Instruction<textarea id="instruction" rows="4" required>Order three encrypted backup drives without a duplicate order.</textarea></label>
           <label>Start URL<input id="start-url" value="http://127.0.0.1:8000" required></label>
-          <label>Planner<select id="provider"><option value="deterministic">Deterministic demo</option><option value="openai">OpenAI</option><option value="grok">Grok</option></select></label>
+          <label>Planner<select id="provider"><option value="deterministic">Order demo</option><option value="job-harness">Dynamic job harness</option><option value="openai">OpenAI</option><option value="grok">Grok</option></select></label>
           <button class="primary" type="submit">Create durable task</button>
         </form>
         <div class="divider"></div>

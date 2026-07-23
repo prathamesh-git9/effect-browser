@@ -56,6 +56,51 @@ def test_external_commit_requires_bound_approval(service) -> None:
     assert remote.commits == 0
 
 
+def test_submit_without_independent_receipt_never_claims_success(service) -> None:
+    class UnverifiablePlanner:
+        name = "unverifiable"
+
+        def plan(self, _request):
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=f"{BASE_URL}/form",
+                    description="Open a synthetic form.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Commit"),
+                    description="Submit without a receipt lookup.",
+                    effect_key="UNVERIFIABLE-EFFECT",
+                    expected_outcome="One remote effect.",
+                ),
+            )
+
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Never trust visible success.",
+        start_url=BASE_URL,
+        planner=UnverifiablePlanner(),
+    )
+    paused = service.run(tenant_id=TENANT, task_id=task.id, driver=FakeDriver(remote))
+    assert paused.next_action is not None
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=paused.next_action.id,
+        expected_version=paused.next_action.version,
+        actor_id="test-operator",
+    )
+
+    result = service.run(tenant_id=TENANT, task_id=task.id, driver=FakeDriver(remote))
+
+    assert remote.commits == 1
+    assert result.task.status is TaskStatus.AWAITING_RECOVERY
+    assert result.next_action is not None
+    assert result.next_action.state is ActionState.OUTCOME_UNKNOWN
+    assert "visible success is not accepted" in result.message
+
+
 def test_crash_after_commit_is_reconciled_without_retry(service) -> None:
     remote = RemoteSystem()
     task, approved = prepare_and_approve(service, remote)

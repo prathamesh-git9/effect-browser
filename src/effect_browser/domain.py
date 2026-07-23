@@ -73,10 +73,22 @@ class Resolution(StrEnum):
 
 
 class Locator(DomainModel):
-    role: str | None = None
-    name: str | None = None
-    label: str | None = None
-    test_id: str | None = None
+    role: str | None = Field(
+        default=None,
+        description="Use only with name; label and test_id must be null.",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Accessible name used only with role; otherwise null.",
+    )
+    label: str | None = Field(
+        default=None,
+        description="Preferred strategy; role, name, and test_id must be null.",
+    )
+    test_id: str | None = Field(
+        default=None,
+        description="Use only when label, role, and name are null.",
+    )
 
     @model_validator(mode="after")
     def exactly_one_strategy(self) -> Locator:
@@ -92,6 +104,7 @@ class ReconciliationSpec(DomainModel):
     url: str
     expected_text: str = Field(min_length=1)
     external_reference: str = Field(min_length=1)
+    receipt_test_id: str | None = None
 
 
 class ProposedAction(DomainModel):

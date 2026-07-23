@@ -81,7 +81,8 @@ def create_demo_router(store_provider: Callable[[], DatabaseStore]) -> APIRouter
             content = f"""
               <p class="eyebrow">Deterministic reconciliation result</p>
               <h1>Existing order</h1>
-              <div class="receipt" data-testid="receipt">
+              <div class="receipt" data-testid="receipt"
+                data-external-id="{escape(order["id"])}">
                 <strong>{escape(order["reference"])}</strong>
                 <span>Order {escape(order["id"])}</span>
                 <span>{order["quantity"]} × {escape(order["product"])}</span>
