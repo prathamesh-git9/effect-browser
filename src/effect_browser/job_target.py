@@ -72,7 +72,12 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
           const response = await fetch('/demo-jobs/api/forms/{JOB_SLUG}');
           if (!response.ok) {{ result.textContent = 'Form failed to load'; return; }}
           root.innerHTML = `
-            <form id="application-form">
+            <form id="application-form"
+              data-effect-reconciliation-url=
+                "/demo-jobs/applications?reference={{effect_key}}"
+              data-effect-reconciliation-text=
+                "Verified application {{effect_key}}"
+              data-effect-receipt-test-id="job-application-receipt">
               <label for="full-name">Full name</label>
               <input id="full-name" name="full_name" required>
               <label for="email">Email</label>

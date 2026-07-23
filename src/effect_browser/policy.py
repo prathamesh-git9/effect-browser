@@ -61,6 +61,20 @@ class ActionPolicy:
                 reason="non-sensitive form preparation is reversible",
             )
         if action.kind is ActionKind.CLICK:
+            if action.target_interaction == "navigation":
+                return PolicyDecision(
+                    allowed=True,
+                    risk=RiskClass.READ,
+                    requires_approval=False,
+                    reason="candidate-bound link navigation is read-only",
+                )
+            if action.target_interaction == "ambiguous":
+                return PolicyDecision(
+                    allowed=True,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=True,
+                    reason="ambiguous candidate-bound click requires operator approval",
+                )
             return PolicyDecision(
                 allowed=False,
                 risk=RiskClass.EXTERNAL_COMMIT,

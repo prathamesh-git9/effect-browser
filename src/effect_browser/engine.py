@@ -10,13 +10,15 @@ from effect_browser.domain import (
     PlanRequest,
     Resolution,
     RunResult,
+    StepRequest,
     Task,
     TaskStatus,
     digest,
     utc_now,
 )
 from effect_browser.policy import ActionPolicy
-from effect_browser.providers.base import Planner
+from effect_browser.providers.base import Planner, StepPlanner
+from effect_browser.providers.reactive import bind_choice
 from effect_browser.store import ConflictError, DatabaseStore
 
 
@@ -49,9 +51,15 @@ class CrashAfterCommitDriver:
 
 
 class EffectBrowserService:
-    def __init__(self, store: DatabaseStore, policy: ActionPolicy) -> None:
+    def __init__(
+        self,
+        store: DatabaseStore,
+        policy: ActionPolicy,
+        step_planners: dict[str, StepPlanner] | None = None,
+    ) -> None:
         self.store = store
         self.policy = policy
+        self.step_planners = step_planners or {}
 
     def create_task(
         self,
@@ -131,10 +139,38 @@ class EffectBrowserService:
             task = self.store.get_task(tenant_id, task_id)
             action = self.store.current_action(tenant_id, task_id)
             if action is None:
-                return RunResult(
-                    task=task,
-                    message="task has no remaining action",
-                )
+                step_planner = self.step_planners.get(task.provider)
+                if step_planner is not None:
+                    snapshot = driver.snapshot()
+                    history = self.store.list_actions(tenant_id, task_id)
+                    request = StepRequest(
+                        task_id=task.id,
+                        instruction=task.instruction,
+                        start_url=task.start_url,
+                        step_number=task.current_ordinal + 1,
+                        effect_reference=f"EB-{str(task.id)[:8].upper()}",
+                        previous_actions=tuple(
+                            f"{item.proposal.kind.value}: {item.proposal.description}"
+                            for item in history
+                        ),
+                        snapshot=snapshot,
+                    )
+                    choice = step_planner.choose(request)
+                    action = self.store.append_action(
+                        tenant_id=tenant_id,
+                        task_id=task_id,
+                        proposal=bind_choice(
+                            choice,
+                            snapshot,
+                            effect_reference=request.effect_reference,
+                        ),
+                    )
+                    task = self.store.get_task(tenant_id, task_id)
+                else:
+                    return RunResult(
+                        task=task,
+                        message="task has no remaining action",
+                    )
             if action.state is ActionState.DISPATCHING:
                 action = self.store.mark_outcome_unknown(
                     tenant_id,
@@ -161,7 +197,23 @@ class EffectBrowserService:
                 )
             if action.state in {ActionState.PENDING, ActionState.INVALIDATED}:
                 observation = driver.observe()
-                decision = self.policy.evaluate(action.proposal, observation.url)
+                if (
+                    action.proposal.planned_from_sha256
+                    and action.proposal.planned_from_sha256 != observation.state_sha256
+                ):
+                    decision = self.policy.evaluate(action.proposal, observation.url)
+                    decision = decision.model_copy(
+                        update={
+                            "allowed": False,
+                            "requires_approval": False,
+                            "reason": (
+                                "page changed after reactive planning; re-planning is "
+                                "required"
+                            ),
+                        }
+                    )
+                else:
+                    decision = self.policy.evaluate(action.proposal, observation.url)
                 action = self.store.prepare_action(
                     tenant_id,
                     action.id,
@@ -256,7 +308,16 @@ class EffectBrowserService:
                     next_action=failed,
                     message="browser action failed",
                 )
-            self.store.complete_action(tenant_id, action.id, receipt)
+            continues = (
+                task.provider in self.step_planners
+                and action.proposal.kind is not ActionKind.FINISH
+            )
+            self.store.complete_action(
+                tenant_id,
+                action.id,
+                receipt,
+                task_continues=continues,
+            )
             completed = self.store.get_task(tenant_id, task_id)
             if completed.status is TaskStatus.SUCCEEDED:
                 return RunResult(task=completed, message="task completed with receipts")

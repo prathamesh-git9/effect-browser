@@ -18,7 +18,14 @@ from effect_browser.engine import (
     SimulatedProcessCrash,
 )
 from effect_browser.policy import ActionPolicy
-from effect_browser.providers import DeterministicPlanner, GrokPlanner, OpenAIPlanner
+from effect_browser.providers import (
+    DeterministicPlanner,
+    GrokPlanner,
+    GrokReactivePlanner,
+    OpenAIPlanner,
+    OpenAIReactivePlanner,
+    ReactiveBootstrapPlanner,
+)
 from effect_browser.store import DatabaseStore
 
 app = typer.Typer(no_args_is_help=True, help="Crash-safe browser operations.")
@@ -29,7 +36,14 @@ def _service() -> EffectBrowserService:
     settings = get_settings()
     store = DatabaseStore(settings.database_url)
     store.initialize()
-    return EffectBrowserService(store, ActionPolicy(settings.allowed_origins))
+    return EffectBrowserService(
+        store,
+        ActionPolicy(settings.allowed_origins),
+        step_planners={
+            "openai-reactive": OpenAIReactivePlanner(settings.openai_model),
+            "grok-reactive": GrokReactivePlanner(settings.grok_model),
+        },
+    )
 
 
 def _planner(name: str):
@@ -37,10 +51,15 @@ def _planner(name: str):
     values = {
         "deterministic": DeterministicPlanner(),
         "openai": OpenAIPlanner(settings.openai_model),
+        "openai-reactive": ReactiveBootstrapPlanner("openai-reactive"),
         "grok": GrokPlanner(settings.grok_model),
+        "grok-reactive": ReactiveBootstrapPlanner("grok-reactive"),
     }
     if name not in values:
-        raise typer.BadParameter("provider must be deterministic, openai, or grok")
+        raise typer.BadParameter(
+            "provider must be deterministic, openai-reactive, grok-reactive, "
+            "openai, or grok"
+        )
     return values[name]
 
 

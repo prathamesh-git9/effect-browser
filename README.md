@@ -52,6 +52,15 @@ The honest test result is documented in
 workflow adapter passes; the current one-shot OpenAI planner does **not** generalize to
 an unfamiliar job page because it does not observe the DOM before planning.
 
+Use `openai-reactive` or `grok-reactive` for the adaptive path. It renders the live
+page, uses Scrapling to produce candidate-bound controls, asks the provider for one
+action, executes it through deterministic policy, and observes again. The legacy
+`openai` and `grok` providers remain only as explicit one-shot baselines.
+
+Scrapling's role and limitations are recorded in
+[docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion
+contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).
+
 Run the durable polling worker separately when tasks should progress without an open
 dashboard. It auto-runs only queued safe work and still stops at approval and recovery
 gates:

@@ -8,10 +8,12 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 from playwright.sync_api import Locator as PWLocator
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from effect_browser.browser.snapshot import ScraplingSnapshotter
 from effect_browser.domain import (
     ActionKind,
     BrowserReceipt,
     Observation,
+    PageSnapshot,
     ProposedAction,
     ReconciliationSpec,
     digest,
@@ -46,14 +48,12 @@ class PlaywrightDriver:
         )
         self._context.tracing.start(screenshots=True, snapshots=True)
         self._page: Page = self._context.new_page()
+        self._snapshotter = ScraplingSnapshotter(
+            artifacts_directory / "scrapling-elements.db"
+        )
 
     def observe(self) -> Observation:
-        try:
-            self._page.wait_for_load_state("networkidle", timeout=3_000)
-        except PlaywrightTimeoutError:
-            # Long-polling pages may never become idle. The state hash still protects
-            # execution: later drift invalidates the action instead of weakening safety.
-            pass
+        self._stabilize()
         title = self._page.title()
         url = self._page.url
         body = self._page.locator("body").inner_text() if url != "about:blank" else ""
@@ -85,6 +85,36 @@ class PlaywrightDriver:
             captured_at=utc_now(),
             screenshot_path=str(screenshot),
         )
+
+    def snapshot(self) -> PageSnapshot:
+        observation = self.observe()
+        if observation.url == "about:blank":
+            return PageSnapshot(
+                url=observation.url,
+                title=observation.title,
+                state_sha256=observation.state_sha256,
+                text_excerpt="",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+        snapshot = self._snapshotter.build(
+            html=self._page.content(),
+            url=observation.url,
+            title=observation.title,
+            state_sha256=observation.state_sha256,
+        )
+        visible = []
+        for candidate in snapshot.candidates:
+            target = self._page.locator(candidate.locator.selector or "")
+            if target.count() == 1 and target.is_visible():
+                filled = False
+                if candidate.interaction == "input":
+                    try:
+                        filled = bool(target.input_value().strip())
+                    except PlaywrightTimeoutError:
+                        filled = False
+                visible.append(candidate.model_copy(update={"filled": filled}))
+        return snapshot.model_copy(update={"candidates": tuple(visible)})
 
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         if action.kind is ActionKind.NAVIGATE:
@@ -139,7 +169,35 @@ class PlaywrightDriver:
             return self._page.get_by_test_id(locator.test_id)
         if locator.label:
             return self._page.get_by_label(locator.label, exact=False)
+        if locator.selector:
+            target = self._page.locator(locator.selector)
+            if target.count() == 0:
+                try:
+                    target.wait_for(state="attached", timeout=5_000)
+                except PlaywrightTimeoutError:
+                    pass
+            if target.count() == 0 and locator.adaptive_id:
+                relocated = self._snapshotter.relocate(
+                    html=self._page.content(),
+                    url=self._page.url,
+                    adaptive_id=locator.adaptive_id,
+                )
+                if relocated:
+                    target = self._page.locator(relocated)
+            if target.count() != 1:
+                raise ValueError(
+                    "candidate selector must resolve to exactly one live element"
+                )
+            return target
         return self._page.get_by_role(locator.role or "", name=locator.name, exact=True)
+
+    def _stabilize(self) -> None:
+        try:
+            self._page.wait_for_load_state("networkidle", timeout=3_000)
+        except PlaywrightTimeoutError:
+            # Long-polling pages may never become idle. The state hash still protects
+            # execution: later drift invalidates the action instead of weakening safety.
+            pass
 
     def _receipt(self, external_id: str) -> BrowserReceipt:
         body = self._page.locator("body").inner_text()

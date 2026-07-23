@@ -5,6 +5,7 @@ from typing import Protocol
 from effect_browser.domain import (
     BrowserReceipt,
     Observation,
+    PageSnapshot,
     ProposedAction,
     ReconciliationSpec,
 )
@@ -12,6 +13,8 @@ from effect_browser.domain import (
 
 class BrowserDriver(Protocol):
     def observe(self) -> Observation: ...
+
+    def snapshot(self) -> PageSnapshot: ...
 
     def execute(self, action: ProposedAction) -> BrowserReceipt: ...
 

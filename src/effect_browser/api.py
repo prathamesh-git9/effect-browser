@@ -25,9 +25,12 @@ from effect_browser.policy import ActionPolicy
 from effect_browser.providers import (
     DeterministicPlanner,
     GrokPlanner,
+    GrokReactivePlanner,
     JobHarnessPlanner,
     OpenAIPlanner,
+    OpenAIReactivePlanner,
     ProviderError,
+    ReactiveBootstrapPlanner,
 )
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 
@@ -64,7 +67,14 @@ def get_store() -> DatabaseStore:
 
 def get_service() -> EffectBrowserService:
     settings = get_settings()
-    return EffectBrowserService(get_store(), ActionPolicy(settings.allowed_origins))
+    return EffectBrowserService(
+        get_store(),
+        ActionPolicy(settings.allowed_origins),
+        step_planners={
+            "openai-reactive": OpenAIReactivePlanner(settings.openai_model),
+            "grok-reactive": GrokReactivePlanner(settings.grok_model),
+        },
+    )
 
 
 @asynccontextmanager
@@ -81,10 +91,15 @@ def planner(name: str):
         "deterministic": DeterministicPlanner(),
         "job-harness": JobHarnessPlanner(),
         "openai": OpenAIPlanner(settings.openai_model),
+        "openai-reactive": ReactiveBootstrapPlanner("openai-reactive"),
         "grok": GrokPlanner(settings.grok_model),
+        "grok-reactive": ReactiveBootstrapPlanner("grok-reactive"),
     }
     if name not in planners:
-        raise ValueError("provider must be deterministic, job-harness, openai, or grok")
+        raise ValueError(
+            "provider must be deterministic, job-harness, openai-reactive, "
+            "grok-reactive, openai, or grok"
+        )
     return planners[name]
 
 

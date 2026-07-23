@@ -87,16 +87,30 @@ class Locator(DomainModel):
     )
     test_id: str | None = Field(
         default=None,
-        description="Use only when label, role, and name are null.",
+        description="Use only when label, role, name, and selector are null.",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="Candidate-bound CSS selector; all other strategies must be null.",
+    )
+    adaptive_id: str | None = Field(
+        default=None,
+        description="Scrapling relocation key associated with a selector strategy.",
     )
 
     @model_validator(mode="after")
     def exactly_one_strategy(self) -> Locator:
-        strategies = [self.label, self.test_id, self.role]
+        strategies = [self.label, self.test_id, self.role, self.selector]
         if sum(item is not None for item in strategies) != 1:
-            raise ValueError("locator requires exactly one of label, test_id, or role")
+            raise ValueError(
+                "locator requires exactly one of label, test_id, role, or selector"
+            )
         if self.role and not self.name:
             raise ValueError("role locator requires an accessible name")
+        if not self.role and self.name:
+            raise ValueError("accessible name is valid only with a role locator")
+        if self.adaptive_id and not self.selector:
+            raise ValueError("adaptive_id requires a selector locator")
         return self
 
 
@@ -116,6 +130,9 @@ class ProposedAction(DomainModel):
     effect_key: str | None = None
     expected_outcome: str | None = None
     reconciliation: ReconciliationSpec | None = None
+    planned_from_sha256: str | None = None
+    target_interaction: str | None = None
+    target_name: str | None = None
 
     @model_validator(mode="after")
     def validate_shape(self) -> ProposedAction:
@@ -147,6 +164,73 @@ class Observation(DomainModel):
     state_sha256: str
     captured_at: datetime
     screenshot_path: str | None = None
+
+
+class ElementCandidate(DomainModel):
+    id: str
+    tag: str
+    role: str
+    name: str
+    input_type: str | None = None
+    required: bool = False
+    disabled: bool = False
+    filled: bool = False
+    href: str | None = None
+    options: tuple[str, ...] = ()
+    interaction: str
+    locator: Locator
+
+
+class SubmissionContract(DomainModel):
+    url_template: str
+    expected_text_template: str
+    receipt_test_id: str | None = None
+
+
+class PageSnapshot(DomainModel):
+    url: str
+    title: str
+    state_sha256: str
+    text_excerpt: str
+    candidates: tuple[ElementCandidate, ...]
+    submission_contract: SubmissionContract | None = None
+    captured_at: datetime
+
+
+class StepRequest(DomainModel):
+    task_id: UUID
+    instruction: str
+    start_url: str
+    step_number: int = Field(ge=1, le=30)
+    effect_reference: str
+    previous_actions: tuple[str, ...]
+    snapshot: PageSnapshot
+
+
+class StepChoice(DomainModel):
+    kind: ActionKind
+    candidate_id: str | None = None
+    value: str | None = None
+    url: str | None = None
+    description: str = Field(min_length=1, max_length=500)
+    expected_outcome: str | None = None
+
+    @model_validator(mode="after")
+    def validate_choice(self) -> StepChoice:
+        if self.kind is ActionKind.NAVIGATE and not self.url:
+            raise ValueError("navigate choice requires url")
+        if self.kind in {ActionKind.FILL, ActionKind.CLICK, ActionKind.SUBMIT}:
+            if not self.candidate_id:
+                raise ValueError(f"{self.kind.value} choice requires candidate_id")
+        if self.kind is ActionKind.FILL and self.value is None:
+            raise ValueError("fill choice requires value")
+        if self.kind is ActionKind.SUBMIT and not self.expected_outcome:
+            raise ValueError("submit choice requires expected_outcome")
+        if self.kind is ActionKind.FINISH and any(
+            (self.candidate_id, self.value, self.url)
+        ):
+            raise ValueError("finish choice cannot target a candidate or URL")
+        return self
 
 
 class BrowserReceipt(DomainModel):

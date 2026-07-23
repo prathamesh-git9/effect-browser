@@ -412,6 +412,60 @@ class DatabaseStore:
             )
             return self._action(row) if row else None
 
+    def append_action(
+        self,
+        *,
+        tenant_id: UUID,
+        task_id: UUID,
+        proposal: ProposedAction,
+    ) -> BrowserAction:
+        with self.session() as session:
+            task = self._task_row(session, tenant_id, task_id)
+            if task.current_ordinal >= 30:
+                raise ConflictError("reactive task reached the 30-action limit")
+            existing = session.scalar(
+                select(ActionRow).where(
+                    ActionRow.tenant_id == str(tenant_id),
+                    ActionRow.task_id == str(task_id),
+                    ActionRow.ordinal == task.current_ordinal,
+                )
+            )
+            if existing is not None:
+                raise ConflictError("task already has a current action")
+            row = ActionRow(
+                id=str(uuid4()),
+                tenant_id=str(tenant_id),
+                task_id=str(task_id),
+                ordinal=task.current_ordinal,
+                proposal=proposal.model_dump(mode="json"),
+                effect_key=proposal.effect_key,
+                state=ActionState.PENDING.value,
+                risk=None,
+                action_sha256=proposal.action_hash(),
+                observation_sha256=None,
+                observation_url=None,
+                failure=None,
+                version=1,
+            )
+            session.add(row)
+            task.status = TaskStatus.QUEUED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                action_id=UUID(row.id),
+                kind="action.planned_from_snapshot",
+                payload={
+                    "ordinal": row.ordinal,
+                    "action_sha256": row.action_sha256,
+                    "planned_from_sha256": proposal.planned_from_sha256,
+                },
+            )
+            session.flush()
+            return self._action(row)
+
     def prepare_action(
         self,
         tenant_id: UUID,
@@ -617,6 +671,7 @@ class DatabaseStore:
         tenant_id: UUID,
         action_id: UUID,
         receipt: BrowserReceipt,
+        task_continues: bool = False,
     ) -> BrowserAction:
         with self.session() as session:
             row = self._locked_action_row(session, tenant_id, action_id)
@@ -652,7 +707,9 @@ class DatabaseStore:
                 )
             )
             task.status = (
-                TaskStatus.QUEUED.value if remaining else TaskStatus.SUCCEEDED.value
+                TaskStatus.QUEUED.value
+                if remaining or task_continues
+                else TaskStatus.SUCCEEDED.value
             )
             task.updated_at = utc_now()
             task.version += 1

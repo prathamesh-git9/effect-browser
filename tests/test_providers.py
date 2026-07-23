@@ -6,9 +6,21 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from effect_browser.domain import PlanRequest
+from effect_browser.domain import (
+    ElementCandidate,
+    Locator,
+    PageSnapshot,
+    PlanRequest,
+    StepRequest,
+    utc_now,
+)
 from effect_browser.providers.base import ProviderError
-from effect_browser.providers.http import PLAN_SCHEMA, OpenAIPlanner
+from effect_browser.providers.http import (
+    PLAN_SCHEMA,
+    STEP_SCHEMA,
+    OpenAIPlanner,
+    OpenAIReactivePlanner,
+)
 
 
 def test_responses_planner_returns_typed_plan(monkeypatch) -> None:
@@ -81,6 +93,14 @@ def test_provider_schema_references_resolve_at_root() -> None:
         reference.removeprefix("#/$defs/") in definitions for reference in references
     )
 
+    references.clear()
+    collect(STEP_SCHEMA)
+    definitions = STEP_SCHEMA.get("$defs", {})
+    assert references
+    assert all(
+        reference.removeprefix("#/$defs/") in definitions for reference in references
+    )
+
 
 def test_provider_http_error_is_safe_and_actionable(monkeypatch) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -103,3 +123,66 @@ def test_provider_http_error_is_safe_and_actionable(monkeypatch) -> None:
                 start_url="https://example.test",
             )
         )
+
+
+def test_reactive_provider_selects_one_fresh_candidate(monkeypatch) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "choice": {
+                            "kind": "click",
+                            "candidate_id": "C001",
+                            "value": None,
+                            "url": None,
+                            "description": "Open the application.",
+                            "expected_outcome": None,
+                        }
+                    }
+                )
+            },
+        )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    planner = OpenAIReactivePlanner(
+        "test-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    snapshot = PageSnapshot(
+        url="https://jobs.example.test",
+        title="Jobs",
+        state_sha256="fresh",
+        text_excerpt="Platform Reliability Engineer",
+        candidates=(
+            ElementCandidate(
+                id="C001",
+                tag="a",
+                role="link",
+                name="Apply",
+                href="https://jobs.example.test/apply",
+                interaction="navigation",
+                locator=Locator(
+                    selector="body > a",
+                    adaptive_id="candidate-apply:0",
+                ),
+            ),
+        ),
+        captured_at=utc_now(),
+    )
+
+    choice = planner.choose(
+        StepRequest(
+            task_id=uuid4(),
+            instruction="Open the application.",
+            start_url=snapshot.url,
+            step_number=1,
+            effect_reference="EB-TEST",
+            previous_actions=(),
+            snapshot=snapshot,
+        )
+    )
+
+    assert choice.candidate_id == "C001"
+    assert choice.kind.value == "click"
