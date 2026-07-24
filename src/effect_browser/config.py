@@ -20,6 +20,7 @@ class Settings(BaseSettings):
         "http://localhost:8000",
     )
     allowed_upload_roots: Annotated[tuple[Path, ...], NoDecode] = ()
+    allowed_upload_origins: Annotated[tuple[str, ...], NoDecode] = ()
     provider: str = "deterministic"
     openai_model: str = "gpt-5.6"
     grok_model: str = "grok-4.5"
@@ -44,6 +45,15 @@ class Settings(BaseSettings):
     def parse_upload_roots(cls, value):
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("allowed_upload_origins", mode="before")
+    @classmethod
+    def parse_upload_origins(cls, value):
+        if isinstance(value, str):
+            return tuple(
+                item.strip().rstrip("/") for item in value.split(",") if item.strip()
+            )
         return value
 
 

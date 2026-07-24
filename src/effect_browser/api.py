@@ -16,11 +16,14 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 from pydantic import BaseModel, Field, model_validator
 
 from effect_browser.browser.playwright import PlaywrightDriver
+from effect_browser.capabilities import capability_catalog
+from effect_browser.capability_target import create_capability_router
 from effect_browser.config import get_settings
 from effect_browser.demo_target import create_demo_router
 from effect_browser.domain import (
     AnswerSensitivity,
     AnswerSource,
+    AutonomyScope,
     BrowserReceipt,
     Resolution,
     VerificationState,
@@ -126,6 +129,7 @@ def driver() -> PlaywrightDriver:
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
+        allowed_upload_origins=settings.allowed_upload_origins,
     )
 
 
@@ -139,6 +143,7 @@ class CreateTaskBody(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    autonomy: AutonomyScope = Field(default_factory=AutonomyScope)
 
     @model_validator(mode="after")
     def document_fields_are_paired(self) -> CreateTaskBody:
@@ -261,6 +266,11 @@ def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/v1/capabilities")
+def capabilities():
+    return capability_catalog()
+
+
 @app.post("/v1/tasks", status_code=201)
 def create_task(
     body: CreateTaskBody,
@@ -275,6 +285,7 @@ def create_task(
         profile_id=body.profile_id,
         document_path=body.document_path,
         document_sha256=body.document_sha256,
+        autonomy=body.autonomy,
     )
 
 
@@ -508,6 +519,7 @@ def verify_audit(
 
 app.include_router(create_demo_router(get_store))
 app.include_router(create_demo_job_router(get_store))
+app.include_router(create_capability_router())
 
 web_dir = Path(__file__).parent / "web"
 app.mount("/assets", StaticFiles(directory=web_dir), name="assets")

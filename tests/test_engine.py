@@ -9,7 +9,10 @@ from sqlalchemy import text
 from effect_browser.domain import (
     ActionKind,
     ActionState,
+    AutonomyMode,
+    AutonomyScope,
     BrowserAction,
+    BrowserReceipt,
     ElementCandidate,
     Locator,
     Observation,
@@ -25,7 +28,7 @@ from effect_browser.domain import (
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlanner
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
-from effect_browser.transmission import fingerprint_request
+from effect_browser.transmission import TransmissionReviewError, fingerprint_request
 
 from .conftest import BASE_URL, TENANT, FakeDriver, RemoteSystem
 
@@ -65,6 +68,84 @@ def test_external_commit_requires_bound_approval(service) -> None:
     assert paused.next_action.state is ActionState.APPROVAL_REQUIRED
     assert paused.next_action.observation_sha256
     assert remote.commits == 0
+
+
+def test_zero_request_submit_preview_can_be_audited_as_superseded(service) -> None:
+    class NativeValidationDriver(FakeDriver):
+        def preview_submit(self, action, observation_sha256):
+            raise TransmissionReviewError(
+                "exact review requires one outgoing request; the submit produced 0"
+            )
+
+    task = create(service)
+    stopped = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=NativeValidationDriver(RemoteSystem()),
+    )
+    failed = stopped.next_action
+    assert failed is not None
+    assert failed.state is ActionState.FAILED
+
+    superseded = service.store.supersede_failed_submit_preview(
+        tenant_id=TENANT,
+        action_id=failed.id,
+        expected_version=failed.version,
+        actor_id="test-operator",
+        authorization_basis="Native validation produced no request.",
+    )
+
+    assert superseded.state is ActionState.SUPERSEDED
+    resumed = service.store.get_task(TENANT, task.id)
+    assert resumed.current_ordinal == failed.ordinal + 1
+    assert resumed.status is TaskStatus.QUEUED
+    with service.store.engine.connect() as connection:
+        released = connection.execute(
+            text("SELECT effect_key FROM actions WHERE id=:action_id"),
+            {"action_id": str(failed.id)},
+        ).scalar_one()
+    assert released is None
+    assert service.store.verify_audit(TENANT).valid
+
+
+def test_bounded_autonomy_commits_without_per_action_intervention(service) -> None:
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Order once under an explicit unattended task scope.",
+        start_url=BASE_URL,
+        planner=DeterministicPlanner(),
+        autonomy=AutonomyScope(
+            mode=AutonomyMode.BOUNDED,
+            allow_external_commits=True,
+            max_external_commits=1,
+        ),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+
+    assert result.task.status is TaskStatus.SUCCEEDED
+    assert remote.commits == 1
+    submit = next(
+        action
+        for action in service.store.list_actions(TENANT, task.id)
+        if action.proposal.kind is ActionKind.SUBMIT
+    )
+    approval = service.store.latest_approval(TENANT, submit.id)
+    assert approval is not None
+    assert approval.actor_id.startswith("bounded-autonomy:")
+    assert approval.payload_sha256 == submit.proposal.outgoing_review.payload_sha256
+    approved_event = next(
+        event
+        for event in service.store.events(TENANT, task.id)
+        if event.kind == "action.approved"
+    )
+    assert "exact reviewed request" in approved_event.payload["authorization_basis"]
+    assert service.store.verify_audit(TENANT).valid
 
 
 def test_submit_without_independent_receipt_never_claims_success(service) -> None:
@@ -179,6 +260,41 @@ def test_crash_after_commit_is_reconciled_without_retry(service) -> None:
     final = service.run(tenant_id=TENANT, task_id=task.id, driver=FakeDriver(remote))
     assert final.task.status is TaskStatus.SUCCEEDED
     assert remote.commits == 1
+
+
+def test_delayed_dispatch_false_negative_requires_external_receipt(service) -> None:
+    task, approved = prepare_and_approve(service, RemoteSystem())
+    service.store.start_dispatch(TENANT, approved.id)
+    failed = service.store.fail_action(
+        TENANT,
+        approved.id,
+        (
+            "exact request was blocked before transmission: approved outgoing "
+            "request was not produced; nothing was sent"
+        ),
+    )
+    receipt = BrowserReceipt(
+        external_id="confirmation-123",
+        url=f"{BASE_URL}/confirmation",
+        evidence_sha256=digest({"confirmation": "Application received"}),
+        captured_at=utc_now(),
+    )
+
+    recovered = service.store.recover_false_pretransmission_failure(
+        tenant_id=TENANT,
+        action_id=failed.id,
+        receipt=receipt,
+        actor_id="test-reconciler",
+        authorization_basis="A synthetic authoritative confirmation was observed.",
+    )
+
+    assert recovered.state is ActionState.SUCCEEDED
+    assert service.store.get_receipt(TENANT, failed.id) == receipt
+    assert service.store.get_task(TENANT, task.id).status in {
+        TaskStatus.QUEUED,
+        TaskStatus.SUCCEEDED,
+    }
+    assert service.store.verify_audit(TENANT).valid
 
 
 def test_page_drift_invalidates_previous_approval(service) -> None:

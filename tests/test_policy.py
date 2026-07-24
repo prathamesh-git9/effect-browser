@@ -7,6 +7,7 @@ from effect_browser.domain import (
     Locator,
     OutgoingReview,
     ProposedAction,
+    RiskClass,
     digest,
 )
 from effect_browser.policy import ActionPolicy
@@ -27,6 +28,28 @@ def test_ambiguous_generic_click_is_rejected() -> None:
 
     assert decision.allowed is False
     assert "ambiguous" in decision.reason
+
+
+def test_observed_option_click_is_reversible_while_other_clicks_keep_gates() -> None:
+    policy = ActionPolicy((BASE_URL,))
+    option_click = ProposedAction(
+        kind=ActionKind.CLICK,
+        locator=Locator(selector="#tz-dublin", adaptive_id="tz-dublin"),
+        description="Choose the observed Dublin option.",
+        target_interaction="option",
+    )
+
+    decision = policy.evaluate(option_click, f"{BASE_URL}/form")
+    ambiguous = policy.evaluate(
+        option_click.model_copy(update={"target_interaction": "ambiguous"}),
+        f"{BASE_URL}/form",
+    )
+
+    assert decision.allowed is True
+    assert decision.risk is RiskClass.INPUT
+    assert decision.requires_approval is False
+    assert ambiguous.requires_approval is True
+    assert ambiguous.risk is RiskClass.EXTERNAL_COMMIT
 
 
 def test_sensitive_fill_is_rejected_by_accessible_name() -> None:
@@ -170,6 +193,38 @@ def test_reviewed_submit_cannot_write_to_a_different_origin() -> None:
         ),
         f"{BASE_URL}/form",
     )
+
+    assert decision.allowed is False
+    assert "origin is not allowed" in decision.reason
+
+
+def test_keyboard_policy_allows_navigation_keys_but_blocks_implicit_commits() -> None:
+    policy = ActionPolicy((BASE_URL,))
+    safe = ProposedAction(
+        kind=ActionKind.PRESS,
+        locator=Locator(label="Region"),
+        key="ArrowDown",
+        description="Move to the next option.",
+    )
+    unsafe = safe.model_copy(
+        update={"key": "Enter", "description": "Try an implicit submit."}
+    )
+
+    assert policy.evaluate(safe, f"{BASE_URL}/form").allowed is True
+    denied = policy.evaluate(unsafe, f"{BASE_URL}/form")
+    assert denied.allowed is False
+    assert "non-commit keyboard allowlist" in denied.reason
+
+
+def test_download_is_bound_to_the_observed_allowlisted_href() -> None:
+    action = ProposedAction(
+        kind=ActionKind.DOWNLOAD,
+        locator=Locator(selector="#manual", adaptive_id="manual"),
+        url="https://collector.example.test/private.txt",
+        description="Try to download from a different origin.",
+    )
+
+    decision = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")
 
     assert decision.allowed is False
     assert "origin is not allowed" in decision.reason

@@ -24,6 +24,22 @@ SENSITIVE_LABELS = {
     "secret",
     "cvv",
 }
+SAFE_PRESS_KEYS = {
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "arrowup",
+    "backspace",
+    "delete",
+    "end",
+    "escape",
+    "home",
+    "pagedown",
+    "pageup",
+    "shift+tab",
+    "space",
+    "tab",
+}
 
 
 class ActionPolicy:
@@ -67,6 +83,44 @@ class ActionPolicy:
                 requires_approval=False,
                 reason="non-sensitive form preparation is reversible",
             )
+        if action.kind is ActionKind.CHECK:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.INPUT,
+                requires_approval=False,
+                reason="checkbox and radio preparation is reversible",
+            )
+        if action.kind is ActionKind.PRESS:
+            if (action.key or "").casefold() not in SAFE_PRESS_KEYS:
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=False,
+                    reason=(
+                        "key is not in the non-commit keyboard allowlist; use "
+                        "fill or an exact reviewed submit action"
+                    ),
+                )
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.INPUT,
+                requires_approval=False,
+                reason="non-commit keyboard interaction is reversible",
+            )
+        if action.kind in {ActionKind.SCROLL, ActionKind.WAIT}:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.READ,
+                requires_approval=False,
+                reason="viewport movement and bounded waiting are read-only",
+            )
+        if action.kind is ActionKind.DOWNLOAD:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.READ,
+                requires_approval=False,
+                reason="download is an inbound transfer from an allowlisted origin",
+            )
         if action.kind is ActionKind.UPLOAD:
             try:
                 self.upload_guard.validate(
@@ -96,6 +150,16 @@ class ActionPolicy:
                     risk=RiskClass.READ,
                     requires_approval=False,
                     reason="candidate-bound link navigation is read-only",
+                )
+            if action.target_interaction == "option":
+                return PolicyDecision(
+                    allowed=True,
+                    risk=RiskClass.INPUT,
+                    requires_approval=False,
+                    reason=(
+                        "selecting an observed listbox option is reversible "
+                        "form preparation"
+                    ),
                 )
             if action.target_interaction == "ambiguous":
                 return PolicyDecision(

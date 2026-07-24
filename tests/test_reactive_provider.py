@@ -14,6 +14,11 @@ def page_snapshot(tmp_path: Path):
         <form data-effect-reconciliation-url="/receipt?ref={effect_key}"
           data-effect-reconciliation-text="Stored {effect_key}">
           <label for="email">Email</label><input id="email" type="email">
+          <label for="insurance">Include insurance</label>
+          <input id="insurance" type="checkbox">
+          <label for="region">Region</label>
+          <select id="region"><option value="ie">Ireland</option></select>
+          <a href="/manual.txt" download>Download manual</a>
           <label for="resume">Résumé</label><input id="resume" type="file">
           <button type="submit">Submit application</button>
         </form>
@@ -149,3 +154,127 @@ def test_submit_review_includes_only_latest_uploaded_document_hash(
 
     assert proposal.outgoing_review is not None
     assert proposal.outgoing_review.document_sha256s == ("2" * 64,)
+
+
+def test_generic_choices_bind_only_to_compatible_scrapling_candidates(
+    tmp_path: Path,
+) -> None:
+    snapshot = page_snapshot(tmp_path)
+    insurance = next(
+        item for item in snapshot.candidates if item.name == "Include insurance"
+    )
+    region = next(item for item in snapshot.candidates if item.name == "Region")
+    manual = next(item for item in snapshot.candidates if item.name == "Download manual")
+
+    check = bind_choice(
+        StepChoice(
+            kind=ActionKind.CHECK,
+            candidate_id=insurance.id,
+            checked=True,
+            description="Enable the observed checkbox.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+    press = bind_choice(
+        StepChoice(
+            kind=ActionKind.PRESS,
+            candidate_id=region.id,
+            key="ArrowDown",
+            description="Move through the observed select options.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+    download = bind_choice(
+        StepChoice(
+            kind=ActionKind.DOWNLOAD,
+            candidate_id=manual.id,
+            description="Download the observed file.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+
+    assert check.locator == insurance.locator
+    assert check.checked is True
+    assert press.locator == region.locator
+    assert press.key == "ArrowDown"
+    assert manual.interaction == "download"
+    assert download.url == "https://jobs.example.test/manual.txt"
+
+    submit = next(item for item in snapshot.candidates if item.interaction == "commit")
+    with pytest.raises(ValueError, match="input candidate"):
+        bind_choice(
+            StepChoice(
+                kind=ActionKind.PRESS,
+                candidate_id=submit.id,
+                key="Space",
+                description="Try to activate a commit with a key.",
+            ),
+            snapshot,
+            effect_reference="EB-12345678",
+        )
+
+
+def open_combobox_snapshot(tmp_path: Path):
+    return ScraplingSnapshotter(tmp_path / "elements.db").build(
+        html="""
+        <label for="timezone">Timezone</label>
+        <input id="timezone" role="combobox" aria-expanded="true"
+          aria-controls="timezone-options" autocomplete="off">
+        <div id="timezone-options" role="listbox">
+          <div id="tz-dublin" role="option">Dublin</div>
+          <div id="tz-lisbon" role="option">Lisbon</div>
+          <div id="tz-commit" role="option">Submit application</div>
+        </div>
+        """,
+        url="https://jobs.example.test/apply",
+        title="Apply",
+        state_sha256="fresh-state",
+    )
+
+
+def test_observed_combobox_option_click_binds_as_option_interaction(
+    tmp_path: Path,
+) -> None:
+    snapshot = open_combobox_snapshot(tmp_path)
+    combobox = next(item for item in snapshot.candidates if item.role == "combobox")
+    dublin = next(item for item in snapshot.candidates if item.name == "Dublin")
+
+    assert combobox.interaction == "input"
+    assert dublin.interaction == "option"
+
+    proposal = bind_choice(
+        StepChoice(
+            kind=ActionKind.CLICK,
+            candidate_id=dublin.id,
+            description="Choose the observed Dublin option.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+
+    assert proposal.locator == dublin.locator
+    assert proposal.target_interaction == "option"
+    assert proposal.planned_from_sha256 == "fresh-state"
+
+
+def test_option_role_takes_precedence_over_commit_wording(tmp_path: Path) -> None:
+    snapshot = open_combobox_snapshot(tmp_path)
+    confirm_option = next(
+        item for item in snapshot.candidates if item.name == "Submit application"
+    )
+
+    assert confirm_option.role == "option"
+    assert confirm_option.interaction == "option"
+    proposal = bind_choice(
+        StepChoice(
+            kind=ActionKind.CLICK,
+            candidate_id=confirm_option.id,
+            description="Choose the observed confirm option without submitting.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+    assert proposal.target_interaction == "option"

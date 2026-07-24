@@ -3,11 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID, uuid4
 
+from effect_browser.autonomy import auto_approval_reason
 from effect_browser.browser.base import BrowserDriver
 from effect_browser.challenge import detect_challenge
 from effect_browser.domain import (
     ActionKind,
     ActionState,
+    AutonomyMode,
+    AutonomyScope,
     BrowserReceipt,
     PlanRequest,
     PolicyDecision,
@@ -89,6 +92,7 @@ class EffectBrowserService:
         profile_id: UUID | None = None,
         document_path: Path | None = None,
         document_sha256: str | None = None,
+        autonomy: AutonomyScope | None = None,
     ) -> Task:
         if (document_path is None) != (document_sha256 is None):
             raise ValueError(
@@ -123,6 +127,7 @@ class EffectBrowserService:
                 validated_document.path if validated_document is not None else None
             ),
             document_sha256=document_sha256,
+            autonomy=autonomy,
         )
 
     def run(
@@ -192,6 +197,7 @@ class EffectBrowserService:
         if replay_uploads:
             try:
                 driver.assert_rehydration_safe()
+                restored_observation = driver.observe()
             except TransmissionBlocked as exc:
                 self.store.start_dispatch(tenant_id, current.id)
                 failed = self.store.fail_action(
@@ -207,7 +213,44 @@ class EffectBrowserService:
                         "request; it was blocked before transmission"
                     ),
                 )
+            if restored_observation.state_sha256 != current.observation_sha256:
+                restored_review = driver.preview_submit(
+                    current.proposal,
+                    restored_observation.state_sha256,
+                )
+                if (
+                    restored_review.observation_sha256
+                    != current.proposal.outgoing_review.observation_sha256
+                    or restored_review.fields != current.proposal.outgoing_review.fields
+                    or restored_review.document_sha256s
+                    != current.proposal.outgoing_review.document_sha256s
+                    or tuple(
+                        request.request_sha256 for request in restored_review.requests
+                    )
+                    != tuple(
+                        request.request_sha256
+                        for request in current.proposal.outgoing_review.requests
+                    )
+                ):
+                    self.store.start_dispatch(tenant_id, current.id)
+                    failed = self.store.fail_action(
+                        tenant_id,
+                        current.id,
+                        (
+                            "outgoing request changed after approval and was "
+                            "blocked before transmission"
+                        ),
+                    )
+                    return RunResult(
+                        task=self.store.get_task(tenant_id, task_id),
+                        next_action=failed,
+                        message=(
+                            "restored outgoing request or preview state differs from "
+                            "the approved review and was blocked before transmission"
+                        ),
+                    )
 
+        automatic_invalidations = 0
         while True:
             self.store.renew_task_lease(
                 tenant_id=tenant_id,
@@ -314,6 +357,8 @@ class EffectBrowserService:
                     message=action.failure or "verified user input is required",
                 )
             if action.state is ActionState.APPROVAL_REQUIRED:
+                action = self._auto_approve(task, action)
+            if action.state is ActionState.APPROVAL_REQUIRED:
                 return RunResult(
                     task=task,
                     next_action=action,
@@ -355,6 +400,16 @@ class EffectBrowserService:
                                 action.proposal,
                                 observation.state_sha256,
                             )
+                            post_preview_observation = driver.observe()
+                            if (
+                                review.observation_sha256
+                                == post_preview_observation.state_sha256
+                            ):
+                                observation = post_preview_observation
+                            elif review.observation_sha256 != observation.state_sha256:
+                                raise ValueError(
+                                    "page changed after outgoing request preview"
+                                )
                             action = self.store.bind_outgoing_review(
                                 tenant_id=tenant_id,
                                 action_id=action.id,
@@ -389,6 +444,8 @@ class EffectBrowserService:
                 )
                 task = self.store.get_task(tenant_id, task_id)
                 if action.state is ActionState.APPROVAL_REQUIRED:
+                    action = self._auto_approve(task, action)
+                if action.state is ActionState.APPROVAL_REQUIRED:
                     return RunResult(
                         task=task,
                         next_action=action,
@@ -410,6 +467,13 @@ class EffectBrowserService:
                     action.id,
                     current_observation.state_sha256,
                 )
+                if (
+                    task.autonomy.mode is AutonomyMode.BOUNDED
+                    and action.proposal.planned_from_sha256 is None
+                    and automatic_invalidations < 3
+                ):
+                    automatic_invalidations += 1
+                    continue
                 return RunResult(
                     task=self.store.get_task(tenant_id, task_id),
                     next_action=invalidated,
@@ -511,6 +575,32 @@ class EffectBrowserService:
             if completed.status is TaskStatus.SUCCEEDED:
                 return RunResult(task=completed, message="task completed with receipts")
 
+    def _auto_approve(self, task: Task, action):
+        reason = auto_approval_reason(
+            task=task,
+            action=action,
+            task_actions=self.store.list_actions(task.tenant_id, task.id),
+            task_document=self.store.task_document(task.tenant_id, task.id),
+        )
+        if reason is None:
+            return action
+        actor = (
+            "bounded-autonomy:"
+            + digest(
+                {
+                    "task_id": str(task.id),
+                    "scope": task.autonomy.model_dump(mode="json"),
+                }
+            )[:16]
+        )
+        return self.store.approve_action(
+            tenant_id=task.tenant_id,
+            action_id=action.id,
+            expected_version=action.version,
+            actor_id=actor,
+            authorization_basis=reason,
+        )
+
     def reconcile(
         self,
         *,
@@ -577,6 +667,8 @@ class EffectBrowserService:
             if action.proposal.kind in {
                 ActionKind.NAVIGATE,
                 ActionKind.FILL,
+                ActionKind.CHECK,
+                ActionKind.PRESS,
                 ActionKind.CLICK,
             } or (replay_uploads and action.proposal.kind is ActionKind.UPLOAD):
                 driver.execute(action.proposal)

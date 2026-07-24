@@ -45,10 +45,17 @@ def bind_choice(
             description=choice.description,
             planned_from_sha256=snapshot.state_sha256,
         )
-    if choice.kind in {ActionKind.FINISH, ActionKind.HANDOFF}:
+    if choice.kind in {
+        ActionKind.FINISH,
+        ActionKind.HANDOFF,
+        ActionKind.SCROLL,
+        ActionKind.WAIT,
+    }:
         return ProposedAction(
             kind=choice.kind,
             description=choice.description,
+            scroll_y=choice.scroll_y,
+            wait_ms=choice.wait_ms,
             planned_from_sha256=snapshot.state_sha256,
         )
     candidates = {
@@ -61,6 +68,21 @@ def bind_choice(
         raise ValueError("step planner selected a missing or disabled candidate")
     if choice.kind is ActionKind.FILL and candidate.interaction != "input":
         raise ValueError("fill choice must target an input candidate")
+    if choice.kind is ActionKind.CHECK and candidate.input_type not in {
+        "checkbox",
+        "radio",
+    }:
+        raise ValueError("check choice must target a checkbox or radio candidate")
+    if (
+        choice.kind is ActionKind.CHECK
+        and candidate.input_type == "radio"
+        and choice.checked is False
+    ):
+        raise ValueError("radio choices can be selected but not directly unchecked")
+    if choice.kind is ActionKind.PRESS and candidate.interaction != "input":
+        raise ValueError("press choice must target an input candidate")
+    if choice.kind is ActionKind.DOWNLOAD and candidate.interaction != "download":
+        raise ValueError("download choice must target an observed download candidate")
     if choice.kind is ActionKind.UPLOAD and candidate.interaction != "upload":
         raise ValueError("upload choice must target a file input candidate")
     if choice.kind is ActionKind.CLICK and candidate.interaction == "commit":
@@ -149,7 +171,10 @@ def bind_choice(
     return ProposedAction(
         kind=choice.kind,
         locator=candidate.locator,
+        url=candidate.href if choice.kind is ActionKind.DOWNLOAD else None,
         value=choice.value,
+        checked=choice.checked,
+        key=choice.key,
         file_path=choice.file_path,
         document_sha256=choice.document_sha256,
         description=choice.description,

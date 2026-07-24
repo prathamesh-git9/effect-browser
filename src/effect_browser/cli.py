@@ -11,8 +11,9 @@ import uvicorn
 from rich.console import Console
 
 from effect_browser.browser.playwright import PlaywrightDriver
+from effect_browser.capabilities import capability_catalog
 from effect_browser.config import get_settings
-from effect_browser.domain import ActionState
+from effect_browser.domain import ActionState, AutonomyMode, AutonomyScope
 from effect_browser.engine import (
     CrashAfterCommitDriver,
     EffectBrowserService,
@@ -73,6 +74,7 @@ def _driver() -> PlaywrightDriver:
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
+        allowed_upload_origins=settings.allowed_upload_origins,
     )
 
 
@@ -81,6 +83,17 @@ def initialize() -> None:
     """Create missing database tables."""
     _service()
     console.print("[green]Effect Browser database is ready.[/green]")
+
+
+@app.command("capabilities")
+def capabilities() -> None:
+    """Print the executor's actual typed capability and guarantee catalog."""
+    console.print_json(
+        json.dumps(
+            [item.model_dump(mode="json") for item in capability_catalog()],
+            sort_keys=True,
+        )
+    )
 
 
 @app.command()
@@ -101,6 +114,10 @@ def create_task(
     profile_id: UUID | None = typer.Option(None),
     document_path: Path | None = typer.Option(None),
     document_sha256: str | None = typer.Option(None),
+    autonomy_mode: AutonomyMode = typer.Option(AutonomyMode.SUPERVISED),
+    allow_file_uploads: bool = typer.Option(False),
+    allow_external_commits: bool = typer.Option(False),
+    max_external_commits: int = typer.Option(0, min=0, max=3),
 ) -> None:
     """Plan and persist a browser task without executing it."""
     settings = get_settings()
@@ -112,6 +129,12 @@ def create_task(
         profile_id=profile_id,
         document_path=document_path.resolve() if document_path else None,
         document_sha256=document_sha256,
+        autonomy=AutonomyScope(
+            mode=autonomy_mode,
+            allow_file_uploads=allow_file_uploads,
+            allow_external_commits=allow_external_commits,
+            max_external_commits=max_external_commits,
+        ),
     )
     console.print_json(task.model_dump_json())
 
@@ -297,7 +320,7 @@ def worker(
     poll_seconds: float = typer.Option(2.0, min=0.1),
     once: bool = typer.Option(False, help="Run one polling cycle and exit."),
 ) -> None:
-    """Run queued work autonomously, stopping at approvals and unknown outcomes."""
+    """Run queued work; bounded tasks consume their recorded pre-authorization."""
     settings = get_settings()
     service = _service()
     console.print(
@@ -308,6 +331,10 @@ def worker(
             task
             for task in service.store.list_tasks(settings.default_tenant_id)
             if task.status.value in {"queued", "running"}
+            or (
+                task.status.value == "awaiting_approval"
+                and task.autonomy.mode is AutonomyMode.BOUNDED
+            )
         ]
         for task in runnable:
             browser = _driver()

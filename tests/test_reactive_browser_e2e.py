@@ -21,6 +21,7 @@ from effect_browser.engine import EffectBrowserService
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import ReactiveBootstrapPlanner
 
+from .test_browser_e2e import edge_executable
 from .test_job_harness_e2e import browser, start_harness
 
 
@@ -497,6 +498,97 @@ def test_file_change_auto_upload_is_blocked_before_server_receives_it(
         assert "blocked before transmission" in result.message
         assert attempts == {"attempts": 0}
         assert ledger == []
+        retried = service.store.retry_blocked_upload(
+            tenant_id=settings.default_tenant_id,
+            action_id=result.next_action.id,
+            expected_version=result.next_action.version,
+            actor_id="reactive-test-operator",
+            authorization_basis="The route guard proved the upload sent no bytes.",
+        )
+        assert retried.state is ActionState.PENDING
+        assert retried.proposal.planned_from_sha256 is None
+        assert service.store.verify_audit(settings.default_tenant_id).valid
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_hash_bound_auto_upload_reaches_only_configured_origin(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    base_url, server, thread = start_harness(tmp_path, monkeypatch)
+    try:
+        settings = get_settings()
+        service = reactive_service(base_url)
+        profile = create_verified_test_profile(service)
+        resume_path = (
+            settings.allowed_upload_roots[0] / "synthetic-resume.txt"
+        ).resolve()
+        task = service.create_task(
+            tenant_id=settings.default_tenant_id,
+            instruction="Exercise a reviewed synthetic résumé auto-upload.",
+            start_url=(
+                f"{base_url}/demo-jobs/jobs/"
+                "platform-reliability-engineer/apply?mode=auto_upload"
+            ),
+            planner=ReactiveBootstrapPlanner("test-reactive"),
+            profile_id=profile.id,
+            document_path=resume_path,
+            document_sha256=hashlib.sha256(resume_path.read_bytes()).hexdigest(),
+        )
+        first = browser()
+        try:
+            paused = service.run(
+                tenant_id=settings.default_tenant_id,
+                task_id=task.id,
+                driver=first,
+            )
+        finally:
+            first.close()
+        upload = paused.next_action
+        assert upload is not None
+        service.store.approve_action(
+            tenant_id=settings.default_tenant_id,
+            action_id=upload.id,
+            expected_version=upload.version,
+            actor_id="reactive-test-operator",
+        )
+
+        from effect_browser.browser.playwright import PlaywrightDriver
+
+        guarded = PlaywrightDriver(
+            executable_path=edge_executable(),
+            headless=True,
+            sandbox=settings.browser_sandbox,
+            artifacts_directory=settings.artifacts_directory,
+            allowed_upload_roots=settings.allowed_upload_roots,
+            allowed_upload_origins=(base_url,),
+        )
+        try:
+            result = service.run(
+                tenant_id=settings.default_tenant_id,
+                task_id=task.id,
+                driver=guarded,
+            )
+        finally:
+            guarded.close()
+
+        attempts = httpx.get(
+            f"{base_url}/demo-jobs/api/auto-upload-attempts",
+            timeout=5,
+        ).json()
+        assert attempts == {"attempts": 1}
+        assert result.next_action is not None
+        assert result.next_action.state is ActionState.APPROVAL_REQUIRED
+        assert result.next_action.proposal.kind is ActionKind.SUBMIT
+        assert (
+            service.store.get_action(settings.default_tenant_id, upload.id).state
+            is ActionState.SUCCEEDED
+        )
     finally:
         server.should_exit = True
         thread.join(timeout=10)

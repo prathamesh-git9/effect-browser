@@ -39,9 +39,42 @@ class TaskStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class AutonomyMode(StrEnum):
+    SUPERVISED = "supervised"
+    BOUNDED = "bounded"
+
+
+class AutonomyScope(DomainModel):
+    """Task-level authority granted before unattended execution starts."""
+
+    mode: AutonomyMode = AutonomyMode.SUPERVISED
+    allow_file_uploads: bool = False
+    allow_external_commits: bool = False
+    max_external_commits: int = Field(default=0, ge=0, le=3)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> AutonomyScope:
+        if self.mode is AutonomyMode.SUPERVISED and (
+            self.allow_file_uploads
+            or self.allow_external_commits
+            or self.max_external_commits
+        ):
+            raise ValueError("supervised mode cannot grant unattended authority")
+        if self.allow_external_commits != (self.max_external_commits > 0):
+            raise ValueError(
+                "allow_external_commits requires max_external_commits from one to three"
+            )
+        return self
+
+
 class ActionKind(StrEnum):
     NAVIGATE = "navigate"
     FILL = "fill"
+    CHECK = "check"
+    PRESS = "press"
+    SCROLL = "scroll"
+    WAIT = "wait"
+    DOWNLOAD = "download"
     UPLOAD = "upload"
     CLICK = "click"
     SUBMIT = "submit"
@@ -60,6 +93,7 @@ class ActionState(StrEnum):
     OUTCOME_UNKNOWN = "outcome_unknown"
     REJECTED = "rejected"
     INVALIDATED = "invalidated"
+    SUPERSEDED = "superseded"
 
 
 class RiskClass(StrEnum):
@@ -279,6 +313,10 @@ class ProposedAction(DomainModel):
     locator: Locator | None = None
     url: str | None = None
     value: str | None = None
+    checked: bool | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=50)
+    scroll_y: int | None = Field(default=None, ge=-5_000, le=5_000)
+    wait_ms: int | None = Field(default=None, ge=100, le=5_000)
     file_path: Path | None = None
     document_sha256: str | None = Field(
         default=None,
@@ -299,6 +337,9 @@ class ProposedAction(DomainModel):
             raise ValueError("navigate requires url")
         if self.kind in {
             ActionKind.FILL,
+            ActionKind.CHECK,
+            ActionKind.PRESS,
+            ActionKind.DOWNLOAD,
             ActionKind.UPLOAD,
             ActionKind.CLICK,
             ActionKind.SUBMIT,
@@ -307,6 +348,22 @@ class ProposedAction(DomainModel):
                 raise ValueError(f"{self.kind.value} requires locator")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill requires value")
+        if self.kind is ActionKind.CHECK and self.checked is None:
+            raise ValueError("check requires checked")
+        if self.kind is ActionKind.PRESS and self.key is None:
+            raise ValueError("press requires key")
+        if self.kind is ActionKind.SCROLL and not self.scroll_y:
+            raise ValueError("scroll requires a non-zero scroll_y")
+        if self.kind is ActionKind.WAIT and self.wait_ms is None:
+            raise ValueError("wait requires wait_ms")
+        if self.kind is not ActionKind.CHECK and self.checked is not None:
+            raise ValueError("checked is valid only for check actions")
+        if self.kind is not ActionKind.PRESS and self.key is not None:
+            raise ValueError("key is valid only for press actions")
+        if self.kind is not ActionKind.SCROLL and self.scroll_y is not None:
+            raise ValueError("scroll_y is valid only for scroll actions")
+        if self.kind is not ActionKind.WAIT and self.wait_ms is not None:
+            raise ValueError("wait_ms is valid only for wait actions")
         if self.kind is ActionKind.UPLOAD:
             if self.file_path is None or self.document_sha256 is None:
                 raise ValueError("upload requires file_path and document_sha256")
@@ -349,6 +406,7 @@ class ElementCandidate(DomainModel):
     input_type: str | None = None
     required: bool = False
     disabled: bool = False
+    expanded: bool = False
     filled: bool = False
     current_value: str | None = None
     href: str | None = None
@@ -407,6 +465,10 @@ class StepChoice(DomainModel):
     kind: ActionKind
     candidate_id: str | None = None
     value: str | None = None
+    checked: bool | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=50)
+    scroll_y: int | None = Field(default=None, ge=-5_000, le=5_000)
+    wait_ms: int | None = Field(default=None, ge=100, le=5_000)
     file_path: Path | None = None
     document_sha256: str | None = Field(
         default=None,
@@ -422,6 +484,9 @@ class StepChoice(DomainModel):
             raise ValueError("navigate choice requires url")
         if self.kind in {
             ActionKind.FILL,
+            ActionKind.CHECK,
+            ActionKind.PRESS,
+            ActionKind.DOWNLOAD,
             ActionKind.UPLOAD,
             ActionKind.CLICK,
             ActionKind.SUBMIT,
@@ -430,6 +495,22 @@ class StepChoice(DomainModel):
                 raise ValueError(f"{self.kind.value} choice requires candidate_id")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill choice requires value")
+        if self.kind is ActionKind.CHECK and self.checked is None:
+            raise ValueError("check choice requires checked")
+        if self.kind is ActionKind.PRESS and self.key is None:
+            raise ValueError("press choice requires key")
+        if self.kind is ActionKind.SCROLL and not self.scroll_y:
+            raise ValueError("scroll choice requires a non-zero scroll_y")
+        if self.kind is ActionKind.WAIT and self.wait_ms is None:
+            raise ValueError("wait choice requires wait_ms")
+        if self.kind is not ActionKind.CHECK and self.checked is not None:
+            raise ValueError("checked is valid only for check choices")
+        if self.kind is not ActionKind.PRESS and self.key is not None:
+            raise ValueError("key is valid only for press choices")
+        if self.kind is not ActionKind.SCROLL and self.scroll_y is not None:
+            raise ValueError("scroll_y is valid only for scroll choices")
+        if self.kind is not ActionKind.WAIT and self.wait_ms is not None:
+            raise ValueError("wait_ms is valid only for wait choices")
         if self.kind is ActionKind.UPLOAD:
             if self.file_path is None or self.document_sha256 is None:
                 raise ValueError("upload choice requires file_path and document_sha256")
@@ -445,6 +526,10 @@ class StepChoice(DomainModel):
             (
                 self.candidate_id,
                 self.value,
+                self.checked,
+                self.key,
+                self.scroll_y,
+                self.wait_ms,
                 self.file_path,
                 self.document_sha256,
                 self.url,
@@ -475,6 +560,11 @@ class Task(DomainModel):
     start_url: str
     provider: str
     profile_id: UUID | None = None
+    document_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    autonomy: AutonomyScope = Field(default_factory=AutonomyScope)
     status: TaskStatus
     current_ordinal: int
     created_at: datetime

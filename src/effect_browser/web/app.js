@@ -119,6 +119,9 @@ function render() {
   $("#task-id").textContent = `TASK ${task.id}`;
   $("#task-title").textContent = task.instruction;
   $("#task-status").textContent = task.status.replaceAll("_", " ");
+  $("#run-note").textContent = task.autonomy.mode === "bounded"
+    ? `Bounded unattended / max ${task.autonomy.max_external_commits} external commits`
+    : "Safe actions run automatically; external effects require approval.";
   $("#action-count").textContent = `${actions.length} actions / cursor ${task.current_ordinal}`;
   $("#actions").innerHTML = actions.map((action, index) => `
     <article class="action">
@@ -273,10 +276,21 @@ $("#create-form").addEventListener("submit", async (event) => {
         profile_id: $("#profile-id").value.trim() || null,
         document_path: $("#document-path").value.trim() || null,
         document_sha256: $("#document-sha256").value.trim() || null,
+        autonomy: {
+          mode: $("#autonomy-mode").value,
+          allow_file_uploads: $("#allow-file-uploads").checked,
+          allow_external_commits: $("#allow-external-commits").checked,
+          max_external_commits: Number($("#max-external-commits").value),
+        },
       }),
     });
     state.selected = task.id;
-    toast("Durable plan created");
+    if ($("#autonomy-mode").value === "bounded") {
+      await api(`/v1/tasks/${task.id}/run`, { method: "POST" });
+      toast("Bounded unattended run started");
+    } else {
+      toast("Durable plan created");
+    }
   });
 });
 $("#profile-select").addEventListener("change", (event) => loadProfile(event.target.value).catch((error) => toast(error.message)));

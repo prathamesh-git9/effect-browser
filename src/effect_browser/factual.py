@@ -14,11 +14,12 @@ from effect_browser.domain import (
 )
 
 CONSEQUENTIAL_TERMS = re.compile(
-    r"\b(name|email|phone|country|location|address|authorization|authorisation|"
+    r"\b(name|email|phone|country|location|address|authori[sz](?:ation|ed)|"
     r"sponsor|sponsorship|visa|salary|compensation|experience|years|age|gender|"
-    r"race|ethnicity|disability|veteran|legal|pronoun|education|employment|"
+    r"race|ethnicity|disability|veteran|legal(?:ly)?|pronoun|education|employment|"
     r"resume|cv|birth|dob|citizenship|nationality|social security|tax|marital|"
-    r"religion|postal|linkedin|website|company|employer|job title|school|degree)\b",
+    r"religion|postal|linkedin|website|company|employer|title|privacy|consent|"
+    r"school|degree)\b",
     re.IGNORECASE,
 )
 HUMAN_CHALLENGE_TERMS = re.compile(
@@ -83,6 +84,56 @@ def deterministic_required_choice(
             ),
         )
     facts_by_name = {fact.field_name: fact for fact in facts}
+    expanded = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.role == "combobox" and candidate.expanded
+        ),
+        None,
+    )
+    if expanded is not None and _is_consequential(expanded):
+        field_name = canonical_field_name(expanded.name)
+        fact = facts_by_name.get(field_name)
+        if (
+            fact is None
+            or fact.verification_state is not VerificationState.VERIFIED
+            or fact.value is None
+        ):
+            return StepChoice(
+                kind=ActionKind.HANDOFF,
+                description=(
+                    f"Verified profile answer {field_name!r} is required for "
+                    f"{expanded.name!r}; no option was guessed."
+                ),
+            )
+        wanted = fact.value.casefold().strip()
+        matches = [
+            candidate
+            for candidate in candidates
+            if candidate.interaction == "option"
+            and (
+                candidate.name.casefold().strip() == wanted
+                or candidate.name.casefold().startswith(f"{wanted} ")
+                or candidate.name.casefold().startswith(f"{wanted}+")
+            )
+        ]
+        if len(matches) != 1:
+            return StepChoice(
+                kind=ActionKind.HANDOFF,
+                description=(
+                    f"Exactly one observed option matching verified fact "
+                    f"{field_name!r} was required; found {len(matches)}."
+                ),
+            )
+        return StepChoice(
+            kind=ActionKind.CLICK,
+            candidate_id=matches[0].id,
+            description=(
+                f"Choose observed option {matches[0].name} for verified fact "
+                f"{field_name}."
+            ),
+        )
     for candidate in candidates:
         if candidate.disabled or candidate.filled:
             continue
@@ -102,6 +153,8 @@ def deterministic_required_choice(
                 document_sha256=document_sha256,
                 description=f"Attach the task-bound document to {candidate.name}.",
             )
+        if candidate.input_type in {"checkbox", "radio"}:
+            continue
         if candidate.interaction != "input" or not _is_consequential(candidate):
             continue
         field_name = canonical_field_name(candidate.name)
@@ -116,6 +169,25 @@ def deterministic_required_choice(
                 description=(
                     f"Verified profile answer {field_name!r} is required for "
                     f"{candidate.name!r}; no value was invented."
+                ),
+            )
+        if candidate.role == "combobox":
+            if candidate.tag.casefold() == "select":
+                return StepChoice(
+                    kind=ActionKind.FILL,
+                    candidate_id=candidate.id,
+                    value=fact.value,
+                    description=(
+                        f"Select {candidate.name} from verified profile fact "
+                        f"{field_name}."
+                    ),
+                )
+            return StepChoice(
+                kind=ActionKind.PRESS,
+                candidate_id=candidate.id,
+                key="ArrowDown",
+                description=(
+                    f"Open {candidate.name} so Scrapling can observe its options."
                 ),
             )
         return StepChoice(

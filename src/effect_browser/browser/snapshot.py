@@ -18,7 +18,8 @@ from effect_browser.domain import (
 
 ACTIONABLE_XPATH = (
     "//input | //textarea | //select | //button | //a[@href] | "
-    "//*[@role='button'] | //*[@role='link'] | //*[@contenteditable='true']"
+    "//*[@role='button'] | //*[@role='link'] | //*[@role='option'] | "
+    "//*[@contenteditable='true']"
 )
 COMMIT_WORDS = re.compile(
     r"\b(submit|confirm|purchase|buy|order|send|publish|delete|remove|"
@@ -41,7 +42,7 @@ class ScraplingSnapshotter:
         url: str,
         title: str,
         state_sha256: str,
-        max_candidates: int = 120,
+        max_candidates: int = 500,
         max_text: int = 8_000,
     ) -> PageSnapshot:
         page = self._page(html, url)
@@ -83,8 +84,19 @@ class ScraplingSnapshotter:
                     role=role,
                     name=name,
                     input_type=input_type,
-                    required="required" in element.attrib,
-                    disabled="disabled" in element.attrib,
+                    required=(
+                        "required" in element.attrib
+                        or str(element.attrib.get("aria-required", "")).casefold()
+                        == "true"
+                    ),
+                    disabled=(
+                        "disabled" in element.attrib
+                        or str(element.attrib.get("aria-disabled", "")).casefold()
+                        == "true"
+                    ),
+                    expanded=(
+                        str(element.attrib.get("aria-expanded", "")).casefold() == "true"
+                    ),
                     filled=bool(current_value),
                     current_value=current_value,
                     href=href,
@@ -215,12 +227,18 @@ class ScraplingSnapshotter:
         name: str,
         href: str | None,
     ) -> str:
+        if href and "download" in element.attrib:
+            return "download"
         if href:
             return "navigation"
         input_type = str(element.attrib.get("type", "")).casefold()
         if input_type == "file":
             return "upload"
-        if input_type == "submit" or COMMIT_WORDS.search(name):
+        if input_type == "submit":
+            return "commit"
+        if str(element.attrib.get("role", "")).strip().casefold() == "option":
+            return "option"
+        if COMMIT_WORDS.search(name):
             return "commit"
         if str(element.tag).casefold() in {"input", "textarea", "select"}:
             return "input"

@@ -45,9 +45,62 @@ def test_create_list_detail_and_audit(tmp_path: Path, monkeypatch) -> None:
         audit = client.get("/v1/audit/verify")
 
     assert created.status_code == 201
+    assert created.json()["autonomy"] == {
+        "mode": "supervised",
+        "allow_file_uploads": False,
+        "allow_external_commits": False,
+        "max_external_commits": 0,
+    }
     assert len(listed.json()) == 1
     assert len(detail.json()["actions"]) == 6
     assert audit.json()["valid"] is True
+
+
+def test_api_records_bounded_authority_and_exposes_capabilities(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with client_for(tmp_path, monkeypatch) as client:
+        created = client.post(
+            "/v1/tasks",
+            json={
+                "instruction": "Run one reviewed synthetic commit unattended.",
+                "provider": "deterministic",
+                "autonomy": {
+                    "mode": "bounded",
+                    "allow_file_uploads": False,
+                    "allow_external_commits": True,
+                    "max_external_commits": 1,
+                },
+            },
+        )
+        capabilities = client.get("/v1/capabilities")
+        invalid = client.post(
+            "/v1/tasks",
+            json={
+                "instruction": "Invalid unbounded authority.",
+                "provider": "deterministic",
+                "autonomy": {
+                    "mode": "supervised",
+                    "allow_external_commits": True,
+                    "max_external_commits": 1,
+                },
+            },
+        )
+
+    assert created.status_code == 201
+    assert created.json()["autonomy"]["mode"] == "bounded"
+    assert created.json()["autonomy"]["max_external_commits"] == 1
+    assert capabilities.status_code == 200
+    assert {item["kind"] for item in capabilities.json()} >= {
+        "check",
+        "press",
+        "scroll",
+        "wait",
+        "download",
+        "submit",
+    }
+    assert invalid.status_code == 422
 
 
 def test_cross_tenant_task_is_hidden(tmp_path: Path, monkeypatch) -> None:

@@ -52,6 +52,8 @@ server application ID, and that ID becomes the durable browser receipt.
 | Crash after real commit | Browser process lost | One application | Restart refuses retry, reconciles, zero duplicates |
 | Payload changes after approval | Nothing accepted | Empty | Request aborted; `FAILED` |
 | File-change auto-upload | No upload received | Zero attempts | Request aborted; `FAILED` |
+| Hash-bound auto-upload | File accepted | One upload attempt | `SUCCEEDED`; request evidence recorded |
+| Delayed JavaScript submit | Application received | One application | Guard waits; exact request and receipt verified |
 
 The cases run through real Microsoft Edge locally and installed Chromium in CI. The
 generic deterministic test planner knows only field semantics and synthetic facts; it
@@ -86,8 +88,9 @@ be false advertising.
 2. Add browser-session takeover for iframes, CAPTCHAs, MFA, authentication, and
    unsupported custom widgets. The engine now reports `INPUT_REQUIRED`; it does not
    solve those challenges.
-3. Add a reviewed protocol for ATS products that auto-upload files or use multiple
-   writes. The MVP blocks those flows instead of weakening the one-request guarantee.
+3. Add adapters for ATS products that use raw PUT uploads or multi-stage write
+   protocols. One exact hash-bound multipart auto-upload is supported; unreviewed
+   multi-write flows remain blocked.
 4. Define an authoritative receipt adapter per target. If the ATS offers no uniquely
    queryable evidence, the result must remain `UNCONFIRMED`, not `APPLIED`.
 5. Run and publish raw live-provider evaluation counts. Passing this deterministic

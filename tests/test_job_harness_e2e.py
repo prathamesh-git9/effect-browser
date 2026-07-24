@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 
@@ -10,7 +11,12 @@ import uvicorn
 from effect_browser import api
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
-from effect_browser.domain import ActionState, TaskStatus
+from effect_browser.domain import (
+    ActionState,
+    AutonomyMode,
+    AutonomyScope,
+    TaskStatus,
+)
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import JobHarnessPlanner
@@ -55,6 +61,7 @@ def browser() -> PlaywrightDriver:
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
+        allowed_upload_origins=settings.allowed_upload_origins,
     )
 
 
@@ -113,6 +120,69 @@ def prepare_application(base_url: str, mode: str):
 
 
 @pytest.mark.e2e
+def test_bounded_autonomy_runs_dynamic_upload_and_commit_without_pause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_url, server, thread = start_harness(tmp_path, monkeypatch)
+    try:
+        settings = get_settings()
+        service = api.get_service()
+        service.policy = ActionPolicy((base_url,), settings.allowed_upload_roots)
+        resume_path = settings.allowed_upload_roots[0] / "synthetic-resume.txt"
+        resume_sha256 = hashlib.sha256(resume_path.read_bytes()).hexdigest()
+        task = service.create_task(
+            tenant_id=settings.default_tenant_id,
+            instruction=(
+                "Submit one synthetic application under this recorded task scope."
+            ),
+            start_url=base_url,
+            planner=JobHarnessPlanner("real", resume_path),
+            document_path=resume_path,
+            document_sha256=resume_sha256,
+            autonomy=AutonomyScope(
+                mode=AutonomyMode.BOUNDED,
+                allow_file_uploads=True,
+                allow_external_commits=True,
+                max_external_commits=1,
+            ),
+        )
+        runner = browser()
+        try:
+            result = service.run(
+                tenant_id=settings.default_tenant_id,
+                task_id=task.id,
+                driver=runner,
+            )
+        finally:
+            runner.close()
+
+        ledger = httpx.get(
+            f"{base_url}/demo-jobs/api/applications",
+            timeout=5,
+        ).json()
+        approvals = [
+            service.store.latest_approval(settings.default_tenant_id, action.id)
+            for action in service.store.list_actions(settings.default_tenant_id, task.id)
+            if action.proposal.kind.value in {"upload", "submit"}
+        ]
+
+        assert result.task.status is TaskStatus.SUCCEEDED
+        assert len(ledger) == 1
+        assert ledger[0]["duplicate_attempts"] == 0
+        assert all(
+            approval is not None and approval.actor_id.startswith("bounded-autonomy:")
+            for approval in approvals
+        )
+        assert service.store.verify_audit(settings.default_tenant_id).valid
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
 def test_dynamic_job_application_requires_authoritative_receipt(
     tmp_path: Path,
     monkeypatch,
@@ -144,6 +214,43 @@ def test_dynamic_job_application_requires_authoritative_receipt(
         assert ledger[0]["duplicate_attempts"] == 0
         assert receipt is not None
         assert receipt.external_id == ledger[0]["id"]
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_delayed_submit_stays_guarded_until_exact_request_arrives(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base_url, server, thread = start_harness(tmp_path, monkeypatch)
+    try:
+        service, task, submit = prepare_application(base_url, "delayed_submit")
+        runner = browser()
+        try:
+            result = service.run(
+                tenant_id=get_settings().default_tenant_id,
+                task_id=task.id,
+                driver=runner,
+            )
+        finally:
+            runner.close()
+
+        ledger = httpx.get(
+            f"{base_url}/demo-jobs/api/applications",
+            timeout=5,
+        ).json()
+        receipt = service.store.get_receipt(
+            get_settings().default_tenant_id,
+            submit.id,
+        )
+        assert result.task.status is TaskStatus.SUCCEEDED
+        assert len(ledger) == 1
+        assert ledger[0]["duplicate_attempts"] == 0
+        assert receipt is not None
     finally:
         server.should_exit = True
         thread.join(timeout=10)

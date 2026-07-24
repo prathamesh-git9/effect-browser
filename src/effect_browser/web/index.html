@@ -11,7 +11,7 @@
   <div class="grain" aria-hidden="true"></div>
   <header class="topbar">
     <a class="brand" href="/">Effect Browser <span>CONTROL PLANE</span></a>
-    <nav><a href="/demo-shop" target="_blank">Order demo</a><a href="/demo-jobs" target="_blank">Job harness</a><a href="/docs">API</a></nav>
+    <nav><a href="/demo-shop" target="_blank">Order demo</a><a href="/demo-jobs" target="_blank">Job harness</a><a href="/demo-capabilities" target="_blank">Capability lab</a><a href="/docs">API</a></nav>
   </header>
   <main>
     <section class="hero">
@@ -35,6 +35,10 @@
           <label>Verified profile ID<input id="profile-id" placeholder="Required for personal facts"></label>
           <label>Approved document path<input id="document-path" placeholder="Absolute local path"></label>
           <label>Document SHA-256<input id="document-sha256" placeholder="64 lowercase hex characters"></label>
+          <label>Execution mode<select id="autonomy-mode"><option value="supervised">Supervised commits</option><option value="bounded">Bounded unattended</option></select></label>
+          <label class="checkbox"><input id="allow-file-uploads" type="checkbox"> Pre-authorize the exact document hash</label>
+          <label class="checkbox"><input id="allow-external-commits" type="checkbox"> Pre-authorize reviewed, reconcilable commits</label>
+          <label>Maximum external commits<input id="max-external-commits" type="number" min="0" max="3" value="0"></label>
           <button class="primary" type="submit">Create durable task</button>
         </form>
         <div class="divider"></div>
@@ -66,7 +70,7 @@
         </div>
         <div id="task-view" hidden>
           <div class="panel-head task-heading"><div><p class="kicker" id="task-id"></p><h2 id="task-title"></h2></div><span class="status" id="task-status"></span></div>
-          <div class="commandbar"><button class="primary" id="run-task">Run / resume</button><span id="run-note">Safe actions run until a hard gate.</span></div>
+          <div class="commandbar"><button class="primary" id="run-task">Run / resume</button><span id="run-note">Safe actions run automatically; commits stay inside the task's recorded authority.</span></div>
           <section id="gate"></section>
           <div class="section-head"><p class="kicker">DURABLE JOURNAL</p><span id="action-count"></span></div>
           <div id="actions" class="timeline"></div>

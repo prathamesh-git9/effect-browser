@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import re
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -47,10 +49,12 @@ class PlaywrightDriver:
         sandbox: bool = True,
         artifacts_directory: Path = Path("artifacts"),
         allowed_upload_roots: tuple[Path, ...] = (),
+        allowed_upload_origins: tuple[str, ...] = (),
     ) -> None:
         artifacts_directory.mkdir(parents=True, exist_ok=True)
         self.artifacts_directory = artifacts_directory
         self._upload_guard = UploadGuard(allowed_upload_roots)
+        self._allowed_upload_origins = {_origin(item) for item in allowed_upload_origins}
         self.session_id = str(uuid4())
         self._playwright: Playwright = sync_playwright().start()
         options = {
@@ -101,7 +105,13 @@ class PlaywrightDriver:
                     "name": item.get_attribute("name"),
                     "type": input_type,
                     "value": (
-                        {"file_selected": bool(value)} if input_type == "file" else value
+                        {"file_selected": bool(value)}
+                        if input_type == "file"
+                        else (
+                            {"checked": item.is_checked()}
+                            if input_type in {"checkbox", "radio"}
+                            else value
+                        )
                     ),
                 }
             )
@@ -162,11 +172,33 @@ class PlaywrightDriver:
                 current_value = None
                 if candidate.interaction in {"input", "upload"}:
                     try:
-                        live_value = target.input_value()
-                        filled = bool(live_value.strip())
-                        current_value = (
-                            live_value if candidate.interaction == "input" else None
-                        )
+                        if candidate.input_type in {"checkbox", "radio"}:
+                            filled = target.is_checked()
+                            current_value = str(filled).lower()
+                        else:
+                            live_value = target.input_value()
+                            if candidate.role == "combobox" and not live_value:
+                                live_value = (
+                                    target.evaluate(
+                                        """
+                                        element => {
+                                          const control = element.closest(
+                                            '[class*="control"]'
+                                          );
+                                          const selected = control?.querySelector(
+                                            '[class*="single-value"],'
+                                            + '[data-selected-value]'
+                                          );
+                                          return selected?.textContent?.trim() || '';
+                                        }
+                                        """
+                                    )
+                                    or ""
+                                )
+                            filled = bool(live_value.strip())
+                            current_value = (
+                                live_value if candidate.interaction == "input" else None
+                            )
                     except PlaywrightTimeoutError:
                         filled = False
                         current_value = None
@@ -175,7 +207,10 @@ class PlaywrightDriver:
                         update={"filled": filled, "current_value": current_value}
                     )
                 )
-        return snapshot.model_copy(update={"candidates": tuple(visible)})
+        # Parse beyond the provider-facing cap because dynamic widgets often retain
+        # hundreds of zero-size role=option nodes. Capping before live visibility
+        # filtering can hide every form control that follows such a widget.
+        return snapshot.model_copy(update={"candidates": tuple(visible[:120])})
 
     def preview_submit(
         self,
@@ -196,14 +231,29 @@ class PlaywrightDriver:
                 payload_sha256=digest(body),
             )
         if base_review.observation_sha256 != observation_sha256:
-            raise TransmissionReviewError(
-                "outgoing review does not match the previewed page state"
+            rebound_body = {
+                "fields": [field.model_dump(mode="json") for field in base_review.fields],
+                "document_sha256s": list(base_review.document_sha256s),
+                "observation_sha256": observation_sha256,
+            }
+            base_review = OutgoingReview(
+                fields=base_review.fields,
+                document_sha256s=base_review.document_sha256s,
+                observation_sha256=observation_sha256,
+                payload_sha256=digest(rebound_body),
             )
         self.assert_rehydration_safe()
         captured = []
         failures: list[str] = []
 
         def abort_and_capture(route: Route) -> None:
+            method = route.request.method.upper()
+            if method in {"GET", "HEAD", "OPTIONS"} or _is_browser_security_write(
+                method,
+                route.request.url,
+            ):
+                route.continue_()
+                return
             try:
                 captured.append(
                     fingerprint_request(
@@ -222,7 +272,7 @@ class PlaywrightDriver:
         try:
             try:
                 self._locator(action).click(timeout=5_000)
-                self._page.wait_for_timeout(350)
+                self._page.wait_for_timeout(3_000)
             except PlaywrightError:
                 # Aborting a native form navigation is expected. Validation below
                 # still requires one fully captured request.
@@ -237,7 +287,24 @@ class PlaywrightDriver:
                 "exact review requires one outgoing request; "
                 f"the submit produced {len(captured)}"
             )
-        return base_review.bind_requests(tuple(captured))
+        post_preview = self.observe()
+        rebound_observation_sha256 = (
+            observation_sha256
+            if post_preview.url.startswith("chrome-error://")
+            else post_preview.state_sha256
+        )
+        rebound_body = {
+            "fields": [field.model_dump(mode="json") for field in base_review.fields],
+            "document_sha256s": list(base_review.document_sha256s),
+            "observation_sha256": rebound_observation_sha256,
+        }
+        rebound = OutgoingReview(
+            fields=base_review.fields,
+            document_sha256s=base_review.document_sha256s,
+            observation_sha256=rebound_observation_sha256,
+            payload_sha256=digest(rebound_body),
+        )
+        return rebound.bind_requests(tuple(captured))
 
     def arm_reviewed_submit(
         self,
@@ -284,9 +351,10 @@ class PlaywrightDriver:
 
     def assert_rehydration_safe(self) -> None:
         if self._rehydration_violations:
+            violations = ", ".join(self._rehydration_violations[:3])
             raise TransmissionBlocked(
                 "approved file selection triggered an unapproved request; "
-                "the request was blocked"
+                f"the request was blocked ({violations})"
             )
 
     def execute(self, action: ProposedAction) -> BrowserReceipt:
@@ -298,27 +366,44 @@ class PlaywrightDriver:
                 target.select_option(action.value or "")
             else:
                 target.fill(action.value or "")
+        elif action.kind is ActionKind.CHECK:
+            self._locator(action).set_checked(bool(action.checked))
+        elif action.kind is ActionKind.PRESS:
+            self._locator(action).press(action.key or "")
+        elif action.kind is ActionKind.SCROLL:
+            self._page.mouse.wheel(0, action.scroll_y or 0)
+            self._page.wait_for_timeout(200)
+        elif action.kind is ActionKind.WAIT:
+            self._page.wait_for_timeout(action.wait_ms or 100)
+        elif action.kind is ActionKind.DOWNLOAD:
+            with self._page.expect_download(timeout=10_000) as pending:
+                self._locator(action).click()
+            download = pending.value
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", download.suggested_filename)
+            destination = (
+                self.artifacts_directory
+                / "downloads"
+                / f"{self.session_id}-{uuid4()}-{safe_name}"
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            download.save_as(destination)
+            return BrowserReceipt(
+                external_id=safe_name,
+                url=self._page.url,
+                evidence_sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
+                captured_at=utc_now(),
+            )
         elif action.kind is ActionKind.UPLOAD:
             upload = self._upload_guard.validate(
                 action.file_path or Path(),
                 action.document_sha256 or "",
             )
             if self._rehydration_handler is None:
-                self._install_upload_guard(self._page.url)
+                return self._execute_guarded_upload(action, upload)
             self._rehydration_contains_upload = True
-            self._locator(action).set_input_files(
-                {
-                    "name": upload.path.name,
-                    "mimeType": (
-                        mimetypes.guess_type(upload.path.name)[0]
-                        or "application/octet-stream"
-                    ),
-                    "buffer": upload.content,
-                }
-            )
-            # File-input change handlers commonly auto-upload. Give them an event
-            # loop turn under the write-blocking guard; never allow an unreviewed
-            # upload request to escape merely because file selection was approved.
+            self._set_input_file(action, upload)
+            # Rehydration is not a new upload authorization. A file input can be
+            # restored only when doing so produces no write request.
             self._page.wait_for_timeout(350)
             self.assert_rehydration_safe()
         elif (
@@ -336,6 +421,105 @@ class PlaywrightDriver:
         else:
             raise ValueError(f"unsupported browser action: {action.kind.value}")
         return self._receipt(action.effect_key or f"local-{action.kind.value}")
+
+    def _set_input_file(self, action: ProposedAction, upload) -> None:
+        self._locator(action).set_input_files(
+            {
+                "name": upload.path.name,
+                "mimeType": (
+                    mimetypes.guess_type(upload.path.name)[0]
+                    or "application/octet-stream"
+                ),
+                "buffer": upload.content,
+            }
+        )
+
+    def _execute_guarded_upload(self, action: ProposedAction, upload) -> BrowserReceipt:
+        """Permit at most one hash-bound multipart upload to an explicit origin."""
+        sent_request = None
+        sent_url: str | None = None
+        response_statuses: list[int] = []
+        violations: list[str] = []
+
+        def capture_response(response) -> None:
+            if (
+                sent_url is not None
+                and response.request.method.upper() == "POST"
+                and response.request.url == sent_url
+            ):
+                response_statuses.append(response.status)
+
+        def verify_and_dispatch(route: Route) -> None:
+            nonlocal sent_request, sent_url
+            method = route.request.method.upper()
+            if method in {"GET", "HEAD", "OPTIONS"}:
+                route.continue_()
+                return
+            target_origin = _origin(route.request.url)
+            if sent_request is not None:
+                violations.append(f"additional {method} request")
+                route.abort("blockedbyclient")
+                return
+            if method != "POST" or target_origin not in self._allowed_upload_origins:
+                violations.append(f"{method} {target_origin}")
+                route.abort("blockedbyclient")
+                return
+            try:
+                reviewed = fingerprint_request(
+                    method=route.request.method,
+                    url=route.request.url,
+                    headers=route.request.headers,
+                    body=route.request.post_data_buffer,
+                )
+            except (TransmissionReviewError, ValueError) as exc:
+                violations.append(str(exc))
+                route.abort("blockedbyclient")
+                return
+            expected_document = action.document_sha256 or ""
+            if (
+                reviewed.content_type != "multipart/form-data"
+                or reviewed.document_sha256s != (expected_document,)
+            ):
+                violations.append(
+                    "write request was not one multipart transfer of the "
+                    "approved document hash"
+                )
+                route.abort("blockedbyclient")
+                return
+            sent_request = reviewed
+            sent_url = route.request.url
+            route.continue_()
+
+        self._page.on("response", capture_response)
+        self._context.route("**/*", verify_and_dispatch)
+        try:
+            self._set_input_file(action, upload)
+            self._page.wait_for_timeout(1_500)
+        finally:
+            self._context.unroute("**/*", handler=verify_and_dispatch)
+            self._page.remove_listener("response", capture_response)
+
+        if sent_request is None:
+            if violations:
+                raise TransmissionBlocked(
+                    "file selection produced an unauthorized write; it was blocked "
+                    f"({violations[0]})"
+                )
+            return self._receipt("local-upload")
+        if violations:
+            raise TransmissionReviewError(
+                "an additional unapproved write followed the document upload"
+            )
+        if not any(200 <= status < 300 for status in response_statuses):
+            raise TransmissionReviewError(
+                "document upload was transmitted but no 2xx response was observed"
+            )
+        return BrowserReceipt(
+            external_id=f"upload-{sent_request.request_sha256[:16]}",
+            url=sent_request.target,
+            evidence_sha256=sent_request.request_sha256,
+            captured_at=utc_now(),
+        )
 
     def _execute_reviewed_submit(self, action: ProposedAction) -> None:
         review = action.outgoing_review
@@ -356,15 +540,16 @@ class PlaywrightDriver:
 
         def compare_and_dispatch(route: Route) -> None:
             nonlocal sent
+            method = route.request.method.upper()
+            if method in {"GET", "HEAD", "OPTIONS"} or _is_browser_security_write(
+                method,
+                route.request.url,
+            ):
+                route.continue_()
+                return
             if sent:
-                method = route.request.method.upper()
-                if method in {"GET", "HEAD", "OPTIONS"} and _origin(
-                    route.request.url
-                ) == _origin(expected.target):
-                    route.continue_()
-                else:
-                    unexpected_requests.append(method)
-                    route.abort("blockedbyclient")
+                unexpected_requests.append(method)
+                route.abort("blockedbyclient")
                 return
             try:
                 actual = fingerprint_request(
@@ -394,10 +579,26 @@ class PlaywrightDriver:
         click_error: PlaywrightError | None = None
         try:
             try:
-                self._locator(action).click(timeout=10_000)
-                self._page.wait_for_load_state("networkidle", timeout=10_000)
+                self._locator(action).click(timeout=10_000, no_wait_after=True)
             except PlaywrightError as exc:
                 click_error = exc
+            deadline = time.monotonic() + 20
+            while (
+                not sent
+                and not mismatch
+                and not unexpected_requests
+                and time.monotonic() < deadline
+            ):
+                self._page.wait_for_timeout(100)
+            if sent:
+                # Keep the route guard armed while the accepted request settles and
+                # the confirmation navigation renders. This also catches any
+                # additional unapproved writes after the exact commit.
+                self._page.wait_for_timeout(2_000)
+                try:
+                    self._page.wait_for_load_state("networkidle", timeout=10_000)
+                except PlaywrightTimeoutError:
+                    pass
         finally:
             self._context.unroute("**/*", handler=compare_and_dispatch)
 
@@ -520,6 +721,16 @@ class PlaywrightDriver:
 
 def _normalize(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _is_browser_security_write(method: str, url: str) -> bool:
+    parsed = urlsplit(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}".casefold()
+    return (
+        method == "POST"
+        and origin in {"https://www.google.com", "https://www.recaptcha.net"}
+        and parsed.path.startswith("/recaptcha/")
+    )
 
 
 def _origin(url: str) -> str:

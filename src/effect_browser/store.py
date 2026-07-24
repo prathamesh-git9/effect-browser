@@ -36,6 +36,7 @@ from effect_browser.domain import (
     ApprovalDecision,
     AuditEvent,
     AuditVerification,
+    AutonomyScope,
     BrowserAction,
     BrowserReceipt,
     FactualProfile,
@@ -69,6 +70,7 @@ class TaskRow(Base):
     profile_id: Mapped[str | None] = mapped_column(String(36), index=True)
     document_path: Mapped[str | None] = mapped_column(Text)
     document_sha256: Mapped[str | None] = mapped_column(String(64))
+    autonomy_scope: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(40), index=True)
     current_ordinal: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -280,6 +282,7 @@ class DatabaseStore:
                 "profile_id": "VARCHAR(36)",
                 "document_path": "TEXT",
                 "document_sha256": "VARCHAR(64)",
+                "autonomy_scope": "JSON",
             }
             for name, sql_type in additions.items():
                 if name in columns:
@@ -540,6 +543,7 @@ class DatabaseStore:
         profile_id: UUID | None = None,
         document_path: Path | None = None,
         document_sha256: str | None = None,
+        autonomy: AutonomyScope | None = None,
     ) -> Task:
         now = utc_now()
         with self.session() as session:
@@ -554,6 +558,7 @@ class DatabaseStore:
                 profile_id=str(profile_id) if profile_id else None,
                 document_path=str(document_path) if document_path else None,
                 document_sha256=document_sha256,
+                autonomy_scope=(autonomy or AutonomyScope()).model_dump(mode="json"),
                 status=TaskStatus.QUEUED.value,
                 current_ordinal=0,
                 created_at=now,
@@ -592,6 +597,7 @@ class DatabaseStore:
                     "action_count": len(actions),
                     "profile_id": str(profile_id) if profile_id else None,
                     "document_sha256": document_sha256,
+                    "autonomy": (autonomy or AutonomyScope()).model_dump(mode="json"),
                 },
             )
             session.flush()
@@ -826,7 +832,12 @@ class DatabaseStore:
             proposal = ProposedAction.model_validate(row.proposal)
             if proposal.kind is not ActionKind.SUBMIT:
                 raise ConflictError("only submit actions can bind an outgoing review")
-            updated = proposal.model_copy(update={"outgoing_review": review})
+            updated = proposal.model_copy(
+                update={
+                    "outgoing_review": review,
+                    "planned_from_sha256": review.observation_sha256,
+                }
+            )
             row.proposal = updated.model_dump(mode="json")
             row.action_sha256 = updated.action_hash()
             row.version += 1
@@ -984,6 +995,7 @@ class DatabaseStore:
         action_id: UUID,
         expected_version: int,
         actor_id: str,
+        authorization_basis: str | None = None,
     ) -> BrowserAction:
         with self.session() as session:
             row = self._locked_action_row(session, tenant_id, action_id)
@@ -1028,6 +1040,7 @@ class DatabaseStore:
                     "action_sha256": row.action_sha256,
                     "observation_sha256": row.observation_sha256,
                     "payload_sha256": payload_sha256,
+                    "authorization_basis": authorization_basis,
                 },
             )
             session.flush()
@@ -1099,6 +1112,11 @@ class DatabaseStore:
             if ActionState(row.state) is not ActionState.PREPARED:
                 raise ConflictError("only a prepared action can be invalidated")
             expected = row.observation_sha256
+            proposal = ProposedAction.model_validate(row.proposal)
+            if proposal.outgoing_review is not None:
+                proposal = proposal.model_copy(update={"outgoing_review": None})
+                row.proposal = proposal.model_dump(mode="json")
+                row.action_sha256 = proposal.action_hash()
             row.state = ActionState.INVALIDATED.value
             row.observation_sha256 = actual_observation_sha256
             row.failure = "page state changed after preparation or approval"
@@ -1116,6 +1134,7 @@ class DatabaseStore:
                 payload={
                     "expected_observation_sha256": expected,
                     "actual_observation_sha256": actual_observation_sha256,
+                    "action_sha256": row.action_sha256,
                 },
             )
             session.flush()
@@ -1269,6 +1288,281 @@ class DatabaseStore:
                 action_id=action_id,
                 kind="action.failed",
                 payload={"failure": failure[:500]},
+            )
+            session.flush()
+            return self._action(row)
+
+    def retry_blocked_upload(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        actor_id: str,
+        authorization_basis: str,
+    ) -> BrowserAction:
+        """Requeue an upload only when the prior attempt provably sent no bytes."""
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed")
+            proposal = ProposedAction.model_validate(row.proposal)
+            failure = row.failure or ""
+            safe_pre_dispatch_failures = (
+                "outgoing request blocked before transmission:",
+                "page changed after reactive planning; re-planning is required",
+            )
+            if (
+                ActionState(row.state) is not ActionState.FAILED
+                or proposal.kind is not ActionKind.UPLOAD
+                or not failure.startswith(safe_pre_dispatch_failures)
+            ):
+                raise ConflictError(
+                    "only a provably unsent upload can be rebound and retried"
+                )
+            if (
+                session.scalar(select(ReceiptRow).where(ReceiptRow.action_id == row.id))
+                is not None
+            ):
+                raise ConflictError("an upload receipt already exists")
+            rebound = proposal.model_copy(update={"planned_from_sha256": None})
+            row.proposal = rebound.model_dump(mode="json")
+            row.action_sha256 = rebound.action_hash()
+            row.state = ActionState.PENDING.value
+            row.risk = None
+            row.observation_sha256 = None
+            row.observation_url = None
+            row.failure = None
+            row.version += 1
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            if task.current_ordinal != row.ordinal:
+                raise ConflictError("blocked upload is no longer the task cursor")
+            task.status = TaskStatus.QUEUED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.retry_authorized",
+                payload={
+                    "actor_id": actor_id[:200],
+                    "authorization_basis": authorization_basis[:500],
+                    "prior_failure": failure[:500],
+                    "rebound_action_sha256": row.action_sha256,
+                    "automatic_retry": False,
+                },
+            )
+            session.flush()
+            return self._action(row)
+
+    def supersede_failed_submit_preview(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        actor_id: str,
+        authorization_basis: str,
+    ) -> BrowserAction:
+        """Advance past a submit proposal that failed before producing a request."""
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed")
+            proposal = ProposedAction.model_validate(row.proposal)
+            failure = row.failure or ""
+            review_request_count = (
+                len(proposal.outgoing_review.requests)
+                if proposal.outgoing_review is not None
+                else 0
+            )
+            safe_preview_failure = (
+                failure.startswith("exact outgoing request review failed:")
+                and review_request_count == 0
+            ) or (
+                failure.startswith("outgoing request origin is not allowed:")
+                and review_request_count == 1
+            )
+            if (
+                ActionState(row.state) is not ActionState.FAILED
+                or proposal.kind is not ActionKind.SUBMIT
+                or not safe_preview_failure
+            ):
+                raise ConflictError(
+                    "only a submit preview with no outgoing request can be superseded"
+                )
+            if (
+                session.scalar(select(ReceiptRow).where(ReceiptRow.action_id == row.id))
+                is not None
+            ):
+                raise ConflictError("a submit receipt already exists")
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            if task.current_ordinal != row.ordinal:
+                raise ConflictError("failed preview is no longer the task cursor")
+            released_effect_key = row.effect_key
+            row.effect_key = None
+            row.state = ActionState.SUPERSEDED.value
+            row.version += 1
+            task.current_ordinal = row.ordinal + 1
+            task.status = TaskStatus.QUEUED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.superseded",
+                payload={
+                    "actor_id": actor_id[:200],
+                    "authorization_basis": authorization_basis[:500],
+                    "prior_failure": failure[:500],
+                    "outgoing_request_count": review_request_count,
+                    "effect_key_released": released_effect_key is not None,
+                },
+            )
+            session.flush()
+            return self._action(row)
+
+    def release_superseded_effect_key(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        actor_id: str,
+    ) -> BrowserAction:
+        """Upgrade a previously superseded zero-request action in place."""
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed")
+            proposal = ProposedAction.model_validate(row.proposal)
+            failure = row.failure or ""
+            review_request_count = (
+                len(proposal.outgoing_review.requests)
+                if proposal.outgoing_review is not None
+                else 0
+            )
+            safe_preview_failure = (
+                failure.startswith("exact outgoing request review failed:")
+                and review_request_count == 0
+            ) or (
+                failure.startswith("outgoing request origin is not allowed:")
+                and review_request_count == 1
+            )
+            if (
+                ActionState(row.state) is not ActionState.SUPERSEDED
+                or proposal.kind is not ActionKind.SUBMIT
+                or not safe_preview_failure
+            ):
+                raise ConflictError(
+                    "only a superseded zero-request submit can release its effect key"
+                )
+            if (
+                session.scalar(select(ReceiptRow).where(ReceiptRow.action_id == row.id))
+                is not None
+            ):
+                raise ConflictError("a submit receipt already exists")
+            if row.effect_key is None:
+                return self._action(row)
+            row.effect_key = None
+            row.version += 1
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.effect_key_released",
+                payload={
+                    "actor_id": actor_id[:200],
+                    "outgoing_request_count": review_request_count,
+                },
+            )
+            session.flush()
+            return self._action(row)
+
+    def recover_false_pretransmission_failure(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        receipt: BrowserReceipt,
+        actor_id: str,
+        authorization_basis: str,
+        task_continues: bool = False,
+    ) -> BrowserAction:
+        """Correct a route-race false negative using concrete external evidence."""
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            proposal = ProposedAction.model_validate(row.proposal)
+            prior_failure = row.failure or ""
+            if (
+                ActionState(row.state) is not ActionState.FAILED
+                or proposal.kind is not ActionKind.SUBMIT
+                or proposal.outgoing_review is None
+                or len(proposal.outgoing_review.requests) != 1
+                or not prior_failure.startswith(
+                    "exact request was blocked before transmission: "
+                    "approved outgoing request was not produced"
+                )
+            ):
+                raise ConflictError(
+                    "only the known delayed-dispatch false negative can be recovered"
+                )
+            if (
+                session.scalar(select(ReceiptRow).where(ReceiptRow.action_id == row.id))
+                is not None
+            ):
+                raise ConflictError("a submit receipt already exists")
+            session.add(
+                ReceiptRow(
+                    id=str(uuid4()),
+                    tenant_id=str(tenant_id),
+                    action_id=row.id,
+                    external_id=receipt.external_id,
+                    url=receipt.url,
+                    evidence_sha256=receipt.evidence_sha256,
+                    captured_at=receipt.captured_at,
+                )
+            )
+            row.state = ActionState.SUCCEEDED.value
+            row.failure = None
+            row.version += 1
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            task.current_ordinal = row.ordinal + 1
+            remaining = session.scalar(
+                select(ActionRow).where(
+                    ActionRow.task_id == row.task_id,
+                    ActionRow.ordinal == task.current_ordinal,
+                )
+            )
+            task.status = (
+                TaskStatus.QUEUED.value
+                if remaining or task_continues
+                else TaskStatus.SUCCEEDED.value
+            )
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.false_negative_recovered",
+                payload={
+                    "actor_id": actor_id[:200],
+                    "authorization_basis": authorization_basis[:500],
+                    "prior_failure": prior_failure[:500],
+                    "external_id": receipt.external_id,
+                    "evidence_sha256": receipt.evidence_sha256,
+                    "url": receipt.url,
+                },
             )
             session.flush()
             return self._action(row)
@@ -1660,6 +1954,8 @@ class DatabaseStore:
             start_url=row.start_url,
             provider=row.provider,
             profile_id=UUID(row.profile_id) if row.profile_id else None,
+            document_sha256=row.document_sha256,
+            autonomy=AutonomyScope.model_validate(row.autonomy_scope or {}),
             status=TaskStatus(row.status),
             current_ordinal=row.current_ordinal,
             created_at=_as_utc(row.created_at),

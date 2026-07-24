@@ -38,6 +38,20 @@ SENSITIVE_FIELD_NAMES = {
     "xsrf",
     "xsrf_token",
 }
+VOLATILE_FIELD_NAMES = {
+    "authenticity_token",
+    "captcha",
+    "captcha_token",
+    "csrf",
+    "csrf_token",
+    "fingerprint",
+    "g_recaptcha_response",
+    "job_application_request_token",
+    "recaptcha_token",
+    "security_code",
+    "xsrf",
+    "xsrf_token",
+}
 
 
 class TransmissionReviewError(ValueError):
@@ -78,7 +92,7 @@ def fingerprint_request(
                 "document_sha256s": list(document_sha256s),
             }
         )
-        if media_type == "multipart/form-data"
+        if raw_body and media_type in SUPPORTED_BODY_TYPES
         else _raw_sha256(raw_body)
     )
     request_body = {
@@ -267,11 +281,19 @@ def _field(name: str, value: str) -> ReviewedRequestField:
         normalized == token or normalized.endswith(f"_{token}")
         for token in SENSITIVE_FIELD_NAMES
     )
-    redacted = sensitive or len(value) > 10_000
+    volatile = any(
+        normalized == token or normalized.endswith(f"_{token}")
+        for token in VOLATILE_FIELD_NAMES
+    )
+    redacted = sensitive or volatile or len(value) > 10_000
     return ReviewedRequestField(
         name=name,
         value=None if redacted else value,
-        value_sha256=digest({"value": value}),
+        value_sha256=(
+            digest({"volatile_field": normalized})
+            if volatile
+            else digest({"value": value})
+        ),
         redacted=redacted,
     )
 

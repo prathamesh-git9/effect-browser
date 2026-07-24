@@ -41,6 +41,31 @@ def test_json_request_fingerprint_exposes_transformed_fields_and_redacts_tokens(
     assert "private-token" not in reviewed.model_dump_json()
 
 
+def test_volatile_security_tokens_do_not_invalidate_stable_application_review() -> None:
+    def reviewed(token: str, email: str):
+        return fingerprint_request(
+            method="POST",
+            url="https://jobs.example.test/api/applications",
+            headers={"content-type": "application/json"},
+            body=json.dumps(
+                {
+                    "email": email,
+                    "g-recaptcha-response": token,
+                    "fingerprint": f"browser-{token}",
+                },
+                separators=(",", ":"),
+            ).encode(),
+        )
+
+    first = reviewed("token-one", "candidate@example.test")
+    refreshed = reviewed("token-two", "candidate@example.test")
+    changed_application = reviewed("token-three", "other@example.test")
+
+    assert first.request_sha256 == refreshed.request_sha256
+    assert first.request_sha256 != changed_application.request_sha256
+    assert "token-one" not in first.model_dump_json()
+
+
 def test_urlencoded_request_keeps_duplicate_fields_in_order() -> None:
     reviewed = fingerprint_request(
         method="POST",
