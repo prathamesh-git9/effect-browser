@@ -3,6 +3,22 @@
 Evaluation date: 2026-07-23. No real employer was contacted. Every value used a
 fictional `.test` identity against the bundled local ATS.
 
+## Reproducible result ledger (2026-07-24)
+
+These are raw repository-run counts, not a claim about arbitrary live sites:
+
+| Evaluation | Pass | Fail | Skipped | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| Deterministic reactive ATS (Edge) | 6 | 0 | 0 | `tests/test_reactive_browser_e2e.py` |
+| Browser policy / challenge (Edge) | 3 | 0 | 0 | `tests/test_browser_e2e.py` |
+| OpenAI reactive provider | 3 | 0 | 0 | Live runs documented below |
+| Grok reactive provider | 0 | 0 | 1 | `XAI_API_KEY` was absent; no result fabricated |
+
+The OpenAI row counts the three documented synthetic runs (preparation,
+authoritative submission, and fake-success recovery). It is a smoke sample, not a
+statistically meaningful benchmark. Run the same harness with `XAI_API_KEY` to
+turn the Grok row into a live result.
+
 ## Question
 
 Does observing the rendered page before every model decision fix the failure of
@@ -87,8 +103,8 @@ The reactive architecture fixes the specific one-shot failure on the tested
 dynamic workflow. The live model used existing controls and supplied facts rather
 than inventing fields.
 
-This is still not proof of universal browser automation. The current tested
-surface does not yet cover file uploads, rich editors, cross-origin iframes,
-multi-page ATS flows, authentication, MFA, CAPTCHA, or sites without an
-authoritative receipt. Those are explicit remaining items in
-`docs/AUTONOMOUS_ROADMAP.md`.
+This is still not proof of universal browser automation. The deterministic
+surface now covers multipart résumé uploads, an embedded-frame human challenge,
+hydration, multi-step transitions, and fake success. It still does not support
+arbitrary rich editors, authenticated sessions, or portals without an
+authoritative receipt; those flows fail closed or remain unconfirmed.
