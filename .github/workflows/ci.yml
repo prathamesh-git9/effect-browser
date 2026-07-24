@@ -28,4 +28,5 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest --cov=effect_browser --cov-report=term-missing
+      - run: python -m build --wheel
       - run: docker build -t effect-browser:test .

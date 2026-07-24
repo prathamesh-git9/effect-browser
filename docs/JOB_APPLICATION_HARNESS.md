@@ -80,8 +80,9 @@ be false advertising.
 
 ## What must exist before real applications
 
-1. Build a usable profile editor and alias review UI. The engine now enforces exact
-   verified field keys, but API-only profile setup is too brittle for real users.
+1. Expand the profile editor with field aliases and import/review workflows. The
+   dashboard now supports creating profiles and saving explicitly verified facts;
+   it intentionally does not infer or silently verify values.
 2. Add browser-session takeover for iframes, CAPTCHAs, MFA, authentication, and
    unsupported custom widgets. The engine now reports `INPUT_REQUIRED`; it does not
    solve those challenges.

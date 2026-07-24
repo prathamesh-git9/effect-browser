@@ -52,9 +52,9 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] Fake success never becomes verified success.
 - [x] A crash after target commit never causes an automatic second submit.
 - [x] CAPTCHA and MFA produce an explicit human-handoff state.
-- [ ] Task, action, approval, profile, receipt, and audit APIs are tenant-isolated.
-- [ ] CLI, dashboard, MCP, Docker, and operations documentation expose the workflow.
-- [ ] Python 3.11 and 3.13 CI, Ruff, full tests, wheel build, and Docker build pass.
+- [x] Task, action, approval, profile, receipt, and audit APIs are tenant-isolated.
+- [x] CLI, dashboard, MCP, Docker, and operations documentation expose the workflow.
+- [x] Python 3.11 and 3.13 CI, Ruff, full tests, wheel build, and Docker build pass.
 - [ ] A live-model evaluation report includes raw pass/fail counts and known limits.
 
 ## Ordered work queue
