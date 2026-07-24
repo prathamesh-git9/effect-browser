@@ -299,7 +299,10 @@ $("#answer-form").addEventListener("submit", async (event) => {
   await mutate(event.submitter, async () => {
     const answer = {
       value: $("#answer-value").value,
-      source: { kind: $("#answer-source").value },
+      source: {
+        kind: $("#answer-source").value,
+        reference: $("#answer-reference").value.trim() || null,
+      },
       sensitivity: $("#answer-sensitivity").value,
       verification_state: $("#answer-verified").checked ? "verified" : "unverified",
       expected_version: state.profile.profile.version,
