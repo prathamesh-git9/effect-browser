@@ -636,6 +636,7 @@ class DatabaseStore:
             TaskStatus.SUCCEEDED.value,
             TaskStatus.FAILED.value,
             TaskStatus.REJECTED.value,
+            TaskStatus.BLOCKED.value,
         }
         with self.session() as session:
             result = session.execute(
@@ -1299,6 +1300,44 @@ class DatabaseStore:
             )
             session.flush()
             return self._action(row)
+
+    def block_task(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        *,
+        kind: str,
+        reason: str,
+        evidence: str,
+    ) -> Task:
+        """Record an explicit human-handoff state; the loop makes no more progress."""
+        with self.session() as session:
+            task = self._task_row(session, tenant_id, task_id)
+            if TaskStatus(task.status) in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.REJECTED,
+                TaskStatus.BLOCKED,
+            }:
+                raise ConflictError(f"cannot block a task that is {task.status}")
+            task.status = TaskStatus.BLOCKED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=task_id,
+                action_id=None,
+                kind="task.blocked",
+                payload={
+                    "challenge": kind,
+                    "reason": reason[:500],
+                    "evidence": evidence[:500],
+                    "automatic_progress": False,
+                },
+            )
+            session.flush()
+            return self._task(task)
 
     def reset_not_committed(
         self,

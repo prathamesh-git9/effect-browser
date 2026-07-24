@@ -33,6 +33,7 @@ class TaskStatus(StrEnum):
     AWAITING_APPROVAL = "awaiting_approval"
     AWAITING_INPUT = "awaiting_input"
     AWAITING_RECOVERY = "awaiting_recovery"
+    BLOCKED = "blocked"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     REJECTED = "rejected"

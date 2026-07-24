@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from effect_browser.browser.base import BrowserDriver
+from effect_browser.challenge import detect_challenge
 from effect_browser.domain import (
     ActionKind,
     ActionState,
@@ -132,7 +133,12 @@ class EffectBrowserService:
         driver: BrowserDriver,
     ) -> RunResult:
         task = self.store.get_task(tenant_id, task_id)
-        if task.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.REJECTED}:
+        if task.status in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.REJECTED,
+            TaskStatus.BLOCKED,
+        }:
             return RunResult(task=task, message=f"task is already {task.status.value}")
         worker_id = f"worker-{uuid4()}"
         self.store.claim_task(
@@ -214,6 +220,22 @@ class EffectBrowserService:
                 step_planner = self.step_planners.get(task.provider)
                 if step_planner is not None:
                     snapshot = driver.snapshot()
+                    challenge = detect_challenge(snapshot)
+                    if challenge is not None:
+                        blocked = self.store.block_task(
+                            tenant_id,
+                            task_id,
+                            kind=challenge.kind.value,
+                            reason=challenge.reason,
+                            evidence=challenge.evidence,
+                        )
+                        return RunResult(
+                            task=blocked,
+                            message=(
+                                f"{challenge.reason}; the task is blocked for human "
+                                "handoff"
+                            ),
+                        )
                     history = self.store.list_actions(tenant_id, task_id)
                     answers = (
                         self.store.list_profile_answers(

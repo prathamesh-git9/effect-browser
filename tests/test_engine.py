@@ -112,6 +112,42 @@ def test_submit_without_independent_receipt_never_claims_success(service) -> Non
     assert "visible success is not accepted" in result.message
 
 
+def test_block_task_records_terminal_handoff_and_keeps_audit_intact(service) -> None:
+    task = create(service)
+
+    blocked = service.store.block_task(
+        TENANT,
+        task.id,
+        kind="captcha",
+        reason="a CAPTCHA challenge requires a human to proceed",
+        evidence="candidate 'turnstile' matched 'cf-turnstile'",
+    )
+
+    assert blocked.status is TaskStatus.BLOCKED
+    events = service.store.events(TENANT, task.id)
+    blocked_events = [event for event in events if event.kind == "task.blocked"]
+    assert len(blocked_events) == 1
+    payload = blocked_events[0].payload
+    assert payload["challenge"] == "captcha"
+    assert payload["automatic_progress"] is False
+    assert service.store.verify_audit(TENANT).valid
+
+    # A blocked task is terminal: it must not be blocked or re-run again.
+    with pytest.raises(ConflictError):
+        service.store.block_task(
+            TENANT,
+            task.id,
+            kind="mfa",
+            reason="second attempt",
+            evidence="ignored",
+        )
+    rerun = service.run(
+        tenant_id=TENANT, task_id=task.id, driver=FakeDriver(RemoteSystem())
+    )
+    assert rerun.task.status is TaskStatus.BLOCKED
+    assert "already blocked" in rerun.message
+
+
 def test_crash_after_commit_is_reconciled_without_retry(service) -> None:
     remote = RemoteSystem()
     task, approved = prepare_and_approve(service, remote)
