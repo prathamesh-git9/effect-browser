@@ -1,6 +1,6 @@
 # Reactive browser evaluation
 
-Evaluation date: 2026-07-23. No real employer was contacted. Every value used a
+Evaluation date: 2026-07-24. No real employer was contacted. Every value used a
 fictional `.test` identity against the bundled local ATS.
 
 ## Reproducible result ledger (2026-07-24)
@@ -12,12 +12,14 @@ These are raw repository-run counts, not a claim about arbitrary live sites:
 | Deterministic reactive ATS (Edge) | 6 | 0 | 0 | `tests/test_reactive_browser_e2e.py` |
 | Browser policy / challenge (Edge) | 3 | 0 | 0 | `tests/test_browser_e2e.py` |
 | OpenAI reactive provider | 3 | 0 | 0 | Live runs documented below |
-| Grok reactive provider | 0 | 0 | 1 | `XAI_API_KEY` was absent; no result fabricated |
+| Grok reactive provider | 1 | 0 | 0 | `tests/test_live_grok_evaluation.py` |
 
 The OpenAI row counts the three documented synthetic runs (preparation,
-authoritative submission, and fake-success recovery). It is a smoke sample, not a
-statistically meaningful benchmark. Run the same harness with `XAI_API_KEY` to
-turn the Grok row into a live result.
+authoritative submission, and fake-success recovery). The Grok row is one live
+synthetic authoritative-submit run: upload approval, submit approval, one ledger
+row, and zero duplicate attempts. These are smoke samples, not a statistically
+meaningful benchmark. Re-run the gated test with `RUN_LIVE_GROK=1` and
+`XAI_API_KEY` to collect another Grok sample.
 
 ## Question
 

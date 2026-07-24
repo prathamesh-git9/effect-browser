@@ -55,7 +55,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] Task, action, approval, profile, receipt, and audit APIs are tenant-isolated.
 - [x] CLI, dashboard, MCP, Docker, and operations documentation expose the workflow.
 - [x] Python 3.11 and 3.13 CI, Ruff, full tests, wheel build, and Docker build pass.
-- [ ] A live-model evaluation report includes raw pass/fail counts and known limits.
+- [x] A live-model evaluation report includes raw pass/fail counts and known limits.
 
 ## Ordered work queue
 
@@ -68,8 +68,8 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] R7: Final outgoing-payload review gate.
 - [x] R8: Multi-page adversarial ATS harness.
 - [x] R9: Generic deterministic reactive-agent tests.
-- [ ] R10: Live OpenAI and Grok evaluations.
-- [ ] R11: Dashboard, CLI, MCP, operations, packaging, and release hardening.
+- [x] R10: Live OpenAI and Grok evaluations.
+- [x] R11: Dashboard, CLI, MCP, operations, packaging, and release hardening.
 
 ## Scheduled-run rules
 

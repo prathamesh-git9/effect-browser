@@ -104,6 +104,10 @@ def create_verified_test_profile(service: EffectBrowserService):
             "Synthetic profile with production Python, distributed systems, "
             "durable execution, and observability experience."
         ),
+        "why_this_role": (
+            "A synthetic test candidate wants to work on reliable distributed "
+            "systems; this answer is not a real application response."
+        ),
     }
     for field_name, value in values.items():
         service.store.put_profile_answer(
