@@ -32,6 +32,9 @@
           <label>Instruction<textarea id="instruction" rows="4" required>Order three encrypted backup drives without a duplicate order.</textarea></label>
           <label>Start URL<input id="start-url" value="http://127.0.0.1:8000" required></label>
           <label>Planner<select id="provider"><option value="deterministic">Order demo</option><option value="job-harness">Dynamic job harness</option><option value="openai-reactive">OpenAI reactive</option><option value="grok-reactive">Grok reactive</option><option value="openai">OpenAI one-shot (legacy)</option><option value="grok">Grok one-shot (legacy)</option></select></label>
+          <label>Verified profile ID<input id="profile-id" placeholder="Required for personal facts"></label>
+          <label>Approved document path<input id="document-path" placeholder="Absolute local path"></label>
+          <label>Document SHA-256<input id="document-sha256" placeholder="64 lowercase hex characters"></label>
           <button class="primary" type="submit">Create durable task</button>
         </form>
         <div class="divider"></div>

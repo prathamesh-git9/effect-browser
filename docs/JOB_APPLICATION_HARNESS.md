@@ -80,11 +80,11 @@ be false advertising.
 
 ## What must exist before real applications
 
-1. Wire the durable user-owned factual profile into planning. The current generic
-   harness planner uses only hard-coded synthetic facts; it is not authorized for a
-   person's application.
-2. Add explicit human-handoff states for iframes, CAPTCHAs, MFA, authentication, and
-   unsupported custom widgets.
+1. Build a usable profile editor and alias review UI. The engine now enforces exact
+   verified field keys, but API-only profile setup is too brittle for real users.
+2. Add browser-session takeover for iframes, CAPTCHAs, MFA, authentication, and
+   unsupported custom widgets. The engine now reports `INPUT_REQUIRED`; it does not
+   solve those challenges.
 3. Add a reviewed protocol for ATS products that auto-upload files or use multiple
    writes. The MVP blocks those flows instead of weakening the one-request guarantee.
 4. Define an authoritative receipt adapter per target. If the ATS offers no uniquely

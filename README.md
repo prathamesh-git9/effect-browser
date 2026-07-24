@@ -60,8 +60,11 @@ action, executes it through deterministic policy, and observes again. The legacy
 Factual profiles are tenant-scoped durable records at `/v1/profiles`. Each answer keeps
 its source, sensitivity class, user-verification state, verifier, and optimistic
 version. Answer values and source references are intentionally absent from the
-hash-chained audit payload. This storage layer is not yet wired into reactive planning:
-until verified-answer enforcement lands, use only synthetic profile facts in demos.
+hash-chained audit payload. Reactive tasks bind an optional profile ID. Consequential
+visible fields are filled locally only from an exactly named, verified answer; missing
+or unverified facts create `INPUT_REQUIRED` before a provider call. Verified facts are
+included in the selected remote provider's step request, so operators must treat that
+provider as a data processor.
 
 Local file inputs are disabled unless `EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS` names one or
 more directories. Every upload action binds an absolute path and the raw-byte SHA-256;
@@ -76,6 +79,12 @@ after a browser restart.
 The dashboard's `job-harness` provider is deliberately synthetic. Put a non-personal
 fixture named `synthetic-resume.txt` in one configured upload root; task creation fails
 clearly if that fixture is absent. Never point the harness at an employer.
+
+Reactive tasks may bind an absolute document path and raw SHA-256. The allowlist and
+bytes are checked at task creation and again at browser execution. The local path is
+stored for the worker but is excluded from task API responses, prompts, and audit
+events. Upload candidates are converted to local deterministic actions; a remote model
+never receives or chooses the path.
 
 Submit approval is based on an abort-first network preview, not only the visible DOM.
 Effect Browser routes the click-generated request, records its method, redacted target,

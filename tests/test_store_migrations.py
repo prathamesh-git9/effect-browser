@@ -40,6 +40,24 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
     with sqlite3.connect(database_path) as connection:
         connection.execute(
             """
+            CREATE TABLE tasks (
+                id VARCHAR(36) PRIMARY KEY,
+                tenant_id VARCHAR(36) NOT NULL,
+                instruction TEXT NOT NULL,
+                start_url TEXT NOT NULL,
+                provider VARCHAR(80) NOT NULL,
+                status VARCHAR(40) NOT NULL,
+                current_ordinal INTEGER NOT NULL,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                version INTEGER NOT NULL,
+                lease_owner VARCHAR(100),
+                lease_expires_at DATETIME
+            )
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE actions (
                 id VARCHAR(36) PRIMARY KEY,
                 action_sha256 VARCHAR(64) NOT NULL,
@@ -112,6 +130,9 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
             column["name"]
             for column in inspect(store.engine).get_columns("demo_job_applications")
         }
+        task_columns = {
+            column["name"] for column in inspect(store.engine).get_columns("tasks")
+        }
         with store.engine.connect() as connection:
             payload_sha256 = connection.execute(
                 text("SELECT payload_sha256 FROM approvals WHERE id='approval-1'")
@@ -121,5 +142,6 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
 
     assert "payload_sha256" in columns
     assert {"resume_filename", "resume_sha256"} <= job_columns
+    assert {"profile_id", "document_path", "document_sha256"} <= task_columns
     assert proposal.outgoing_review is not None
     assert payload_sha256 == proposal.outgoing_review.payload_sha256

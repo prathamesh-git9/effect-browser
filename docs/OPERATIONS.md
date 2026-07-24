@@ -29,6 +29,20 @@ outside the application. The durable observation stores only hashes and URLs.
 | `EFFECT_BROWSER_ARTIFACTS_DIRECTORY` | Trace and screenshot destination. |
 | `OPENAI_API_KEY` / `XAI_API_KEY` | Needed only for the matching planner. |
 
+## Factual profiles and task documents
+
+Create verified answers through `/v1/profiles` before starting a personal reactive
+workflow. Field keys are normalized accessible labels: for example, `Full name` becomes
+`full_name` and `Years using Python` becomes `years_using_python`. Unverified values are
+never placed in a planning request. A missing consequential key moves the task to
+`awaiting_input`; update and verify the profile, then call the action's `resume-input`
+endpoint or CLI command to permit fresh re-planning.
+
+Task document paths must be absolute, inside an allowed upload root, and paired with the
+raw file SHA-256. Paths remain in the local database because the browser worker needs
+them, but are excluded from task responses, model prompts, and the audit ledger. Protect
+the database accordingly.
+
 An application allow list is not a network sandbox. Enforce outbound network policy at
 the container or host layer as well. The sample container disables Chromium's sandbox
 because typical Docker runtimes block its user namespace; compensate with a non-root
@@ -43,7 +57,8 @@ container, seccomp/AppArmor, dropped capabilities, and isolated egress.
 - `GET /v1/audit/verify` recomputes the tenant event chain and checks its durable head.
 
 Alert on repeated `409` conflicts, failed audit verification, tasks in
-`awaiting_recovery`, and leases that expire while an action is `dispatching`.
+`awaiting_recovery` or `awaiting_input`, and leases that expire while an action is
+`dispatching`.
 
 ## Unknown-outcome recovery
 

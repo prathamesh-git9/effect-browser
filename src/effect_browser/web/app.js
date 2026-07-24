@@ -205,6 +205,24 @@ function renderGate(action) {
         body: JSON.stringify({ expected_version: action.version, resolution: "not_committed" }),
       }),
     ));
+  } else if (action.state === "input_required") {
+    gate.className = "gate unknown";
+    gate.innerHTML = `
+      <p class="kicker">VERIFIED INPUT OR HUMAN STEP REQUIRED</p>
+      <h3>Automation stopped without guessing</h3>
+      <p>${escapeHtml(action.failure || action.proposal.description)}</p>
+      <p>Update the task's factual profile or complete the named human-only step,
+      then explicitly resume re-planning. This does not submit anything.</p>
+      <div class="gate-actions">
+        <button class="secondary" id="resume-input">Resume after resolution</button>
+      </div>`;
+    $("#resume-input").addEventListener("click", (event) => mutate(
+      event.currentTarget,
+      () => api(`/v1/actions/${action.id}/resume-input`, {
+        method: "POST",
+        body: JSON.stringify({ expected_version: action.version }),
+      }),
+    ));
   }
 }
 
@@ -228,6 +246,9 @@ $("#create-form").addEventListener("submit", async (event) => {
         instruction: $("#instruction").value,
         start_url: $("#start-url").value,
         provider: $("#provider").value,
+        profile_id: $("#profile-id").value.trim() || null,
+        document_path: $("#document-path").value.trim() || null,
+        document_sha256: $("#document-sha256").value.trim() || null,
       }),
     });
     state.selected = task.id;

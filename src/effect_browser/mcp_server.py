@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID
 
 from effect_browser.api import get_service, planner
@@ -19,6 +20,9 @@ def create_mcp_server():
         instruction: str,
         start_url: str,
         provider: str = "deterministic",
+        profile_id: str | None = None,
+        document_path: str | None = None,
+        document_sha256: str | None = None,
     ) -> dict:
         """Plan and persist a browser task; this does not execute browser actions."""
         task = get_service().create_task(
@@ -26,6 +30,9 @@ def create_mcp_server():
             instruction=instruction,
             start_url=start_url,
             planner=planner(provider),
+            profile_id=UUID(profile_id) if profile_id else None,
+            document_path=Path(document_path).resolve() if document_path else None,
+            document_sha256=document_sha256,
         )
         return task.model_dump(mode="json")
 

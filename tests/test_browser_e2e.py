@@ -113,6 +113,46 @@ def test_real_browser_upload_is_allowlisted_hash_bound_and_path_redacted(
 
 
 @pytest.mark.e2e
+def test_real_browser_snapshot_exposes_embedded_human_challenge(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "iframe-challenge.html"
+    page.write_text(
+        """
+        <!doctype html><title>Challenge fixture</title>
+        <h1>Continue application</h1>
+        <iframe title="Verification"
+          srcdoc="<p>Please verify you are human with reCAPTCHA</p>"></iframe>
+        """,
+        encoding="utf-8",
+    )
+    driver = PlaywrightDriver(
+        executable_path=edge_executable(),
+        headless=True,
+        sandbox=os.getenv(
+            "EFFECT_BROWSER_BROWSER_SANDBOX",
+            "true",
+        ).casefold()
+        not in {"0", "false", "no", "off"},
+        artifacts_directory=tmp_path / "artifacts",
+    )
+    try:
+        driver.execute(
+            ProposedAction(
+                kind=ActionKind.NAVIGATE,
+                url=page.resolve().as_uri(),
+                description="Open a local embedded challenge fixture.",
+            )
+        )
+        snapshot = driver.snapshot()
+    finally:
+        driver.close()
+
+    assert "verify you are human" in snapshot.text_excerpt
+    assert "reCAPTCHA" in snapshot.text_excerpt
+
+
+@pytest.mark.e2e
 def test_real_browser_crash_reconciles_one_order(tmp_path: Path, monkeypatch) -> None:
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"

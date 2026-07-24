@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from effect_browser.browser.base import BrowserDriver
@@ -18,6 +19,7 @@ from effect_browser.domain import (
     digest,
     utc_now,
 )
+from effect_browser.factual import deterministic_required_choice, planning_facts
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers.base import Planner, StepPlanner
 from effect_browser.providers.reactive import bind_choice
@@ -83,7 +85,20 @@ class EffectBrowserService:
         instruction: str,
         start_url: str,
         planner: Planner,
+        profile_id: UUID | None = None,
+        document_path: Path | None = None,
+        document_sha256: str | None = None,
     ) -> Task:
+        if (document_path is None) != (document_sha256 is None):
+            raise ValueError(
+                "document_path and document_sha256 must be supplied together"
+            )
+        validated_document = None
+        if document_path is not None and document_sha256 is not None:
+            validated_document = self.policy.upload_guard.validate(
+                document_path,
+                document_sha256,
+            )
         task_id = uuid4()
         request = PlanRequest(
             task_id=task_id,
@@ -102,6 +117,11 @@ class EffectBrowserService:
             start_url=start_url,
             provider=planner.name,
             actions=actions,
+            profile_id=profile_id,
+            document_path=(
+                validated_document.path if validated_document is not None else None
+            ),
+            document_sha256=document_sha256,
         )
 
     def run(
@@ -195,6 +215,16 @@ class EffectBrowserService:
                 if step_planner is not None:
                     snapshot = driver.snapshot()
                     history = self.store.list_actions(tenant_id, task_id)
+                    answers = (
+                        self.store.list_profile_answers(
+                            tenant_id,
+                            task.profile_id,
+                        )
+                        if task.profile_id is not None
+                        else []
+                    )
+                    facts = planning_facts(answers)
+                    document = self.store.task_document(tenant_id, task_id)
                     request = StepRequest(
                         task_id=task.id,
                         instruction=task.instruction,
@@ -205,9 +235,18 @@ class EffectBrowserService:
                             f"{item.proposal.kind.value}: {item.proposal.description}"
                             for item in history
                         ),
+                        facts=facts,
                         snapshot=snapshot,
                     )
-                    choice = step_planner.choose(request)
+                    choice = deterministic_required_choice(
+                        text_excerpt=snapshot.text_excerpt,
+                        candidates=snapshot.candidates,
+                        facts=facts,
+                        document_path=document[0] if document else None,
+                        document_sha256=document[1] if document else None,
+                    )
+                    if choice is None:
+                        choice = step_planner.choose(request)
                     action = self.store.append_action(
                         tenant_id=tenant_id,
                         task_id=task_id,
@@ -246,6 +285,12 @@ class EffectBrowserService:
                     next_action=action,
                     message="outcome is unknown; reconcile or resolve it",
                 )
+            if action.state is ActionState.INPUT_REQUIRED:
+                return RunResult(
+                    task=task,
+                    next_action=action,
+                    message=action.failure or "verified user input is required",
+                )
             if action.state is ActionState.APPROVAL_REQUIRED:
                 return RunResult(
                     task=task,
@@ -254,6 +299,18 @@ class EffectBrowserService:
                 )
             if action.state in {ActionState.PENDING, ActionState.INVALIDATED}:
                 observation = driver.observe()
+                if action.proposal.kind is ActionKind.HANDOFF:
+                    handoff = self.store.require_input(
+                        tenant_id=tenant_id,
+                        action_id=action.id,
+                        observation=observation,
+                        reason=action.proposal.description,
+                    )
+                    return RunResult(
+                        task=self.store.get_task(tenant_id, task_id),
+                        next_action=handoff,
+                        message=handoff.failure or "verified user input is required",
+                    )
                 if (
                     action.proposal.planned_from_sha256
                     and action.proposal.planned_from_sha256 != observation.state_sha256

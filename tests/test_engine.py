@@ -10,9 +10,11 @@ from effect_browser.domain import (
     ActionKind,
     ActionState,
     BrowserAction,
+    ElementCandidate,
     Locator,
     Observation,
     OutgoingReview,
+    PageSnapshot,
     PolicyDecision,
     ProposedAction,
     RiskClass,
@@ -21,7 +23,7 @@ from effect_browser.domain import (
     utc_now,
 )
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
-from effect_browser.providers import DeterministicPlanner
+from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlanner
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 from effect_browser.transmission import fingerprint_request
 
@@ -424,3 +426,68 @@ def test_rehydration_never_replays_a_completed_upload(
     service._rehydrate(TENANT, task_id, RecordingDriver(), current_ordinal=2)
 
     assert executed == [ActionKind.NAVIGATE]
+
+
+def test_reactive_task_requires_verified_fact_before_planner_can_guess(
+    service,
+) -> None:
+    class PlannerMustNotRun:
+        name = "profile-test"
+
+        def choose(self, _request):
+            raise AssertionError("planner must not see an unresolved identity field")
+
+    class ProfileDriver(FakeDriver):
+        def snapshot(self) -> PageSnapshot:
+            observation = self.observe()
+            return PageSnapshot(
+                url=self.url,
+                title="Synthetic application",
+                state_sha256=observation.state_sha256,
+                text_excerpt="Application",
+                candidates=(
+                    ElementCandidate(
+                        id="C001",
+                        tag="input",
+                        role="textbox",
+                        name="Full name",
+                        input_type="text",
+                        required=True,
+                        interaction="input",
+                        locator=Locator(
+                            selector="body > input",
+                            adaptive_id="candidate-name:0",
+                        ),
+                    ),
+                ),
+                captured_at=utc_now(),
+            )
+
+    service.step_planners = {"profile-test": PlannerMustNotRun()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Prepare a synthetic application without inventing identity.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner("profile-test"),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=ProfileDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.AWAITING_INPUT
+    assert result.next_action is not None
+    assert result.next_action.state is ActionState.INPUT_REQUIRED
+    assert result.next_action.proposal.kind is ActionKind.HANDOFF
+    assert "full_name" in result.message
+
+    resumed = service.store.resolve_input(
+        tenant_id=TENANT,
+        action_id=result.next_action.id,
+        expected_version=result.next_action.version,
+        actor_id="test-operator",
+    )
+    assert resumed.state is ActionState.SUCCEEDED
+    assert service.store.get_task(TENANT, task.id).status is TaskStatus.QUEUED

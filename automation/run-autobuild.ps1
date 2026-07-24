@@ -72,8 +72,56 @@ $prompt
     }
 
     & codex @arguments 2>&1 | Tee-Object -FilePath $eventLog
-    if ($LASTEXITCODE -ne 0) {
-        throw "codex exec failed with exit code $LASTEXITCODE"
+    $codexExitCode = $LASTEXITCODE
+    if ($codexExitCode -ne 0) {
+        $usageLimited = Select-String `
+            -LiteralPath $eventLog `
+            -Pattern "usage limit" `
+            -Quiet
+        if (-not $usageLimited) {
+            throw "codex exec failed with exit code $codexExitCode"
+        }
+
+        # The user explicitly authorized Claude Code as the unattended fallback.
+        # Throttle it to one bounded invocation per six hours so a persistent
+        # Codex quota outage cannot create an unbounded external bill.
+        $recentClaude = Get-ChildItem `
+            -LiteralPath $logDirectory `
+            -Filter "*.claude.txt" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+        if (
+            $recentClaude -and
+            $recentClaude.LastWriteTime -gt (Get-Date).AddHours(-6)
+        ) {
+            exit 0
+        }
+        $claudeLog = Join-Path $logDirectory "$stamp.claude.txt"
+        $allowedTools = (
+            "Read,Edit,Write,Glob,Grep," +
+            "Bash(git *),Bash(*python*),Bash(*pytest*)," +
+            "Bash(*ruff*),Bash(node --check *)"
+        )
+        $claudeArguments = @(
+            "-p",
+            "--no-session-persistence",
+            "--permission-mode", "acceptEdits",
+            "--allowedTools", $allowedTools,
+            "--max-budget-usd", "1.00",
+            "--effort", "medium",
+            $prompt
+        )
+        Push-Location -LiteralPath $resolvedWorktree
+        try {
+            & claude @claudeArguments 2>&1 |
+                Tee-Object -FilePath $claudeLog
+            if ($LASTEXITCODE -ne 0) {
+                throw "Claude fallback failed with exit code $LASTEXITCODE"
+            }
+        }
+        finally {
+            Pop-Location
+        }
     }
 }
 finally {

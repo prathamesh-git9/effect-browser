@@ -159,8 +159,9 @@ class ReactiveResponsesPlanner:
                             "visibly complete. "
                             "Do not invent personal, legal, demographic, employment, "
                             "authorization, sponsorship, salary, or identity facts. If "
-                            "a required fact is absent, finish with a description that "
-                            "states the blocker instead of guessing."
+                            "a required fact is absent, choose handoff and state the "
+                            "blocker instead of guessing. Use finish only when the "
+                            "requested outcome is visibly and verifiably complete."
                         ),
                     },
                     {

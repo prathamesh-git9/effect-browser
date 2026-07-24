@@ -105,12 +105,14 @@ class PlaywrightDriver:
                     ),
                 }
             )
+        frames = self._frame_evidence()
         state_sha256 = digest(
             {
                 "url": url,
                 "title": title,
                 "body": _normalize(body),
                 "controls": controls,
+                "frames": frames,
             }
         )
         screenshot = self.artifacts_directory / f"{self.session_id}-{uuid4()}.png"
@@ -140,6 +142,18 @@ class PlaywrightDriver:
             title=observation.title,
             state_sha256=observation.state_sha256,
         )
+        frame_text = " ".join(
+            f"Embedded frame {frame['url']} {frame['body']}"
+            for frame in self._frame_evidence()
+        )
+        if frame_text:
+            snapshot = snapshot.model_copy(
+                update={
+                    "text_excerpt": (
+                        f"{snapshot.text_excerpt} {frame_text}".strip()[:8_000]
+                    )
+                }
+            )
         visible = []
         for candidate in snapshot.candidates:
             target = self._page.locator(candidate.locator.selector or "")
@@ -472,6 +486,21 @@ class PlaywrightDriver:
             # Long-polling pages may never become idle. The state hash still protects
             # execution: later drift invalidates the action instead of weakening safety.
             pass
+
+    def _frame_evidence(self) -> list[dict[str, str]]:
+        evidence = []
+        for frame in self._page.frames[1:]:
+            try:
+                body = frame.locator("body").inner_text(timeout=1_000)
+            except PlaywrightError:
+                body = ""
+            evidence.append(
+                {
+                    "url": frame.url,
+                    "body": _normalize(body)[:2_000],
+                }
+            )
+        return evidence
 
     def _receipt(self, external_id: str) -> BrowserReceipt:
         body = self._page.locator("body").inner_text()

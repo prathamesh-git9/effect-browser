@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
@@ -132,6 +132,22 @@ class CreateTaskBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=4_000)
     start_url: str = "http://127.0.0.1:8000"
     provider: str = "deterministic"
+    profile_id: UUID | None = None
+    document_path: Path | None = None
+    document_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def document_fields_are_paired(self) -> CreateTaskBody:
+        if (self.document_path is None) != (self.document_sha256 is None):
+            raise ValueError(
+                "document_path and document_sha256 must be supplied together"
+            )
+        if self.document_path is not None and not self.document_path.is_absolute():
+            raise ValueError("document_path must be absolute")
+        return self
 
 
 class DecisionBody(BaseModel):
@@ -250,6 +266,9 @@ def create_task(
         instruction=body.instruction,
         start_url=body.start_url,
         planner=planner(body.provider),
+        profile_id=body.profile_id,
+        document_path=body.document_path,
+        document_sha256=body.document_sha256,
     )
 
 
@@ -370,6 +389,21 @@ def approve_action(
     service: Annotated[EffectBrowserService, Depends(get_service)],
 ):
     return service.store.approve_action(
+        tenant_id=who.tenant_id,
+        action_id=action_id,
+        expected_version=body.expected_version,
+        actor_id=who.actor_id,
+    )
+
+
+@app.post("/v1/actions/{action_id}/resume-input")
+def resume_input(
+    action_id: UUID,
+    body: DecisionBody,
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.resolve_input(
         tenant_id=who.tenant_id,
         action_id=action_id,
         expected_version=body.expected_version,

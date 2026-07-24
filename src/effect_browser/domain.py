@@ -31,6 +31,7 @@ class TaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_INPUT = "awaiting_input"
     AWAITING_RECOVERY = "awaiting_recovery"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -43,12 +44,14 @@ class ActionKind(StrEnum):
     UPLOAD = "upload"
     CLICK = "click"
     SUBMIT = "submit"
+    HANDOFF = "handoff"
     FINISH = "finish"
 
 
 class ActionState(StrEnum):
     PENDING = "pending"
     APPROVAL_REQUIRED = "approval_required"
+    INPUT_REQUIRED = "input_required"
     PREPARED = "prepared"
     DISPATCHING = "dispatching"
     SUCCEEDED = "succeeded"
@@ -376,7 +379,27 @@ class StepRequest(DomainModel):
     step_number: int = Field(ge=1, le=30)
     effect_reference: str
     previous_actions: tuple[str, ...]
+    facts: tuple[PlanningFact, ...] = ()
     snapshot: PageSnapshot
+
+
+class PlanningFact(DomainModel):
+    field_name: str
+    value: str | None = None
+    source: AnswerSource
+    sensitivity: AnswerSensitivity
+    verification_state: VerificationState
+
+    @model_validator(mode="after")
+    def hide_unverified_value(self) -> PlanningFact:
+        if (
+            self.verification_state is VerificationState.UNVERIFIED
+            and self.value is not None
+        ):
+            raise ValueError("unverified planning facts cannot expose a value")
+        if self.verification_state is VerificationState.VERIFIED and self.value is None:
+            raise ValueError("verified planning facts require a value")
+        return self
 
 
 class StepChoice(DomainModel):
@@ -417,7 +440,7 @@ class StepChoice(DomainModel):
             )
         if self.kind is ActionKind.SUBMIT and not self.expected_outcome:
             raise ValueError("submit choice requires expected_outcome")
-        if self.kind is ActionKind.FINISH and any(
+        if self.kind in {ActionKind.FINISH, ActionKind.HANDOFF} and any(
             (
                 self.candidate_id,
                 self.value,
@@ -426,7 +449,7 @@ class StepChoice(DomainModel):
                 self.url,
             )
         ):
-            raise ValueError("finish choice cannot target a candidate or URL")
+            raise ValueError(f"{self.kind.value} choice cannot target a candidate or URL")
         return self
 
 
@@ -450,6 +473,7 @@ class Task(DomainModel):
     instruction: str
     start_url: str
     provider: str
+    profile_id: UUID | None = None
     status: TaskStatus
     current_ordinal: int
     created_at: datetime

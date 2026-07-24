@@ -22,6 +22,8 @@ work-authorization, sponsorship, salary, or identity answers.
 
 - `PREPARED`: the form is filled but nothing has been submitted.
 - `AWAITING_APPROVAL`: the exact action and current page hash need user approval.
+- `AWAITING_INPUT`: a verified fact, task document, CAPTCHA, MFA, or human-only step
+  stopped automation before any guess.
 - `SUBMITTED_VERIFIED`: independent target evidence identifies the stored effect.
 - `SUBMITTED_UNCONFIRMED`: dispatch happened but persistence cannot be proved.
 - `BLOCKED`: CAPTCHA, MFA, missing factual data, unsupported UI, or policy stopped
@@ -39,7 +41,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] The engine supports navigation, click, fill, select, file upload, and submit.
 - [x] A factual profile stores answer value, source, sensitivity, and user
       verification state.
-- [ ] Missing or unverified consequential answers stop the workflow.
+- [x] Missing or unverified consequential answers stop the workflow.
 - [x] Résumé bytes stay outside prompts and logs; only approved local paths reach
       the browser executor.
 - [x] A final review displays every outgoing field and document hash before submit.
@@ -49,7 +51,7 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 - [x] A generic reactive planner completes the harness without a site-specific plan.
 - [x] Fake success never becomes verified success.
 - [x] A crash after target commit never causes an automatic second submit.
-- [ ] CAPTCHA and MFA produce an explicit human-handoff state.
+- [x] CAPTCHA and MFA produce an explicit human-handoff state.
 - [ ] Task, action, approval, profile, receipt, and audit APIs are tenant-isolated.
 - [ ] CLI, dashboard, MCP, Docker, and operations documentation expose the workflow.
 - [ ] Python 3.11 and 3.13 CI, Ruff, full tests, wheel build, and Docker build pass.

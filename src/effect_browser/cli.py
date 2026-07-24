@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -96,6 +97,9 @@ def create_task(
     instruction: str = typer.Argument(...),
     start_url: str = typer.Option("http://127.0.0.1:8000"),
     provider: str = typer.Option("deterministic"),
+    profile_id: UUID | None = typer.Option(None),
+    document_path: Path | None = typer.Option(None),
+    document_sha256: str | None = typer.Option(None),
 ) -> None:
     """Plan and persist a browser task without executing it."""
     settings = get_settings()
@@ -104,6 +108,9 @@ def create_task(
         instruction=instruction,
         start_url=start_url,
         planner=_planner(provider),
+        profile_id=profile_id,
+        document_path=document_path.resolve() if document_path else None,
+        document_sha256=document_sha256,
     )
     console.print_json(task.model_dump_json())
 
@@ -133,6 +140,23 @@ def approve(
     """Approve the exact prepared action and bound page observation."""
     settings = get_settings()
     result = _service().store.approve_action(
+        tenant_id=settings.default_tenant_id,
+        action_id=action_id,
+        expected_version=expected_version,
+        actor_id=actor,
+    )
+    console.print_json(result.model_dump_json())
+
+
+@app.command("resume-input")
+def resume_input(
+    action_id: UUID,
+    expected_version: int = typer.Option(..., min=1),
+    actor: str = typer.Option("cli-operator"),
+) -> None:
+    """Resume re-planning after the required profile fact or human step is resolved."""
+    settings = get_settings()
+    result = _service().store.resolve_input(
         tenant_id=settings.default_tenant_id,
         action_id=action_id,
         expected_version=expected_version,

@@ -45,7 +45,7 @@ def bind_choice(
             description=choice.description,
             planned_from_sha256=snapshot.state_sha256,
         )
-    if choice.kind is ActionKind.FINISH:
+    if choice.kind in {ActionKind.FINISH, ActionKind.HANDOFF}:
         return ProposedAction(
             kind=choice.kind,
             description=choice.description,

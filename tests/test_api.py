@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -111,3 +112,41 @@ def test_profile_api_preserves_answer_metadata_and_hides_cross_tenant(
     assert [item["id"] for item in listed.json()] == [profile_id]
     assert hidden.status_code == 404
     assert blocked_write.status_code == 404
+
+
+def test_task_binds_tenant_profile_and_allowlisted_document(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    document = tmp_path / "synthetic-resume.txt"
+    document.write_bytes(b"synthetic profile document")
+    document_sha256 = hashlib.sha256(document.read_bytes()).hexdigest()
+    monkeypatch.setenv("EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS", str(tmp_path))
+    stranger = {"X-Tenant-ID": "30000000-0000-0000-0000-000000000003"}
+
+    with client_for(tmp_path, monkeypatch) as client:
+        profile = client.post("/v1/profiles", json={"name": "Synthetic task facts"})
+        created = client.post(
+            "/v1/tasks",
+            json={
+                "instruction": "Prepare a synthetic application.",
+                "provider": "openai-reactive",
+                "profile_id": profile.json()["id"],
+                "document_path": str(document.resolve()),
+                "document_sha256": document_sha256,
+            },
+        )
+        cross_tenant = client.post(
+            "/v1/tasks",
+            headers=stranger,
+            json={
+                "instruction": "Must not borrow another tenant's facts.",
+                "provider": "openai-reactive",
+                "profile_id": profile.json()["id"],
+            },
+        )
+
+    assert created.status_code == 201
+    assert created.json()["profile_id"] == profile.json()["id"]
+    assert "document_path" not in created.json()
+    assert cross_tenant.status_code == 404

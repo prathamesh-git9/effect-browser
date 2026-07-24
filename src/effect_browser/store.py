@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -65,6 +66,9 @@ class TaskRow(Base):
     instruction: Mapped[str] = mapped_column(Text)
     start_url: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(String(80))
+    profile_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    document_path: Mapped[str | None] = mapped_column(Text)
+    document_sha256: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(40), index=True)
     current_ordinal: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -268,6 +272,25 @@ class DatabaseStore:
                 with self.engine.begin() as connection:
                     connection.exec_driver_sql(statement)
             self._backfill_payload_approval_hashes()
+        if "tasks" in tables:
+            columns = {
+                column["name"] for column in inspect(self.engine).get_columns("tasks")
+            }
+            additions = {
+                "profile_id": "VARCHAR(36)",
+                "document_path": "TEXT",
+                "document_sha256": "VARCHAR(64)",
+            }
+            for name, sql_type in additions.items():
+                if name in columns:
+                    continue
+                qualifier = (
+                    " IF NOT EXISTS" if self.engine.dialect.name == "postgresql" else ""
+                )
+                with self.engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE tasks ADD COLUMN{qualifier} {name} {sql_type}"
+                    )
         if "demo_job_applications" in tables:
             columns = {
                 column["name"]
@@ -514,15 +537,23 @@ class DatabaseStore:
         start_url: str,
         provider: str,
         actions: tuple[ProposedAction, ...],
+        profile_id: UUID | None = None,
+        document_path: Path | None = None,
+        document_sha256: str | None = None,
     ) -> Task:
         now = utc_now()
         with self.session() as session:
+            if profile_id is not None:
+                self._profile_row(session, tenant_id, profile_id)
             task = TaskRow(
                 id=str(task_id),
                 tenant_id=str(tenant_id),
                 instruction=instruction,
                 start_url=start_url,
                 provider=provider,
+                profile_id=str(profile_id) if profile_id else None,
+                document_path=str(document_path) if document_path else None,
+                document_sha256=document_sha256,
                 status=TaskStatus.QUEUED.value,
                 current_ordinal=0,
                 created_at=now,
@@ -556,7 +587,12 @@ class DatabaseStore:
                 task_id=task_id,
                 action_id=None,
                 kind="task.created",
-                payload={"provider": provider, "action_count": len(actions)},
+                payload={
+                    "provider": provider,
+                    "action_count": len(actions),
+                    "profile_id": str(profile_id) if profile_id else None,
+                    "document_sha256": document_sha256,
+                },
             )
             session.flush()
             return self._task(task)
@@ -573,6 +609,17 @@ class DatabaseStore:
                 .order_by(TaskRow.created_at.desc())
             ).all()
             return [self._task(row) for row in rows]
+
+    def task_document(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+    ) -> tuple[Path, str] | None:
+        with self.session() as session:
+            row = self._task_row(session, tenant_id, task_id)
+            if row.document_path is None or row.document_sha256 is None:
+                return None
+            return Path(row.document_path), row.document_sha256
 
     def claim_task(
         self,
@@ -847,6 +894,84 @@ class DatabaseStore:
                     "risk": decision.risk.value,
                     "reason": decision.reason,
                 },
+            )
+            session.flush()
+            return self._action(row)
+
+    def require_input(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        observation: Observation,
+        reason: str,
+    ) -> BrowserAction:
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if ActionState(row.state) not in {
+                ActionState.PENDING,
+                ActionState.INVALIDATED,
+            }:
+                raise ConflictError("only a pending action can require input")
+            proposal = ProposedAction.model_validate(row.proposal)
+            if proposal.kind is not ActionKind.HANDOFF:
+                raise ConflictError("only handoff actions can require input")
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            row.state = ActionState.INPUT_REQUIRED.value
+            row.risk = RiskClass.INPUT.value
+            row.observation_sha256 = observation.state_sha256
+            row.observation_url = observation.url
+            row.failure = reason[:2_000]
+            row.version += 1
+            task.status = TaskStatus.AWAITING_INPUT.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.input_required",
+                payload={
+                    "action_sha256": row.action_sha256,
+                    "observation_sha256": observation.state_sha256,
+                    "reason": reason[:500],
+                },
+            )
+            session.flush()
+            return self._action(row)
+
+    def resolve_input(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        actor_id: str,
+    ) -> BrowserAction:
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed; reload before resuming")
+            if ActionState(row.state) is not ActionState.INPUT_REQUIRED:
+                raise ConflictError("action is not awaiting input")
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            if task.current_ordinal != row.ordinal:
+                raise ConflictError("handoff is not the current action")
+            row.state = ActionState.SUCCEEDED.value
+            row.failure = None
+            row.version += 1
+            task.current_ordinal += 1
+            task.status = TaskStatus.QUEUED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.input_resolved",
+                payload={"actor_id": actor_id},
             )
             session.flush()
             return self._action(row)
@@ -1495,6 +1620,7 @@ class DatabaseStore:
             instruction=row.instruction,
             start_url=row.start_url,
             provider=row.provider,
+            profile_id=UUID(row.profile_id) if row.profile_id else None,
             status=TaskStatus(row.status),
             current_ordinal=row.current_ordinal,
             created_at=_as_utc(row.created_at),
