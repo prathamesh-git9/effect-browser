@@ -78,9 +78,11 @@ $prompt
             -LiteralPath $eventLog `
             -Pattern "usage limit" `
             -Quiet
-        if (-not $usageLimited) {
-            throw "codex exec failed with exit code $codexExitCode"
-        }
+        # A scheduled Codex run can also fail on a transient CLI/network error
+        # without printing the quota text. The fallback is bounded and throttled,
+        # so abandoning the worktree in that case is less useful than one recovery
+        # attempt. Keep the flag for diagnostics in the fallback log.
+        $failureReason = if ($usageLimited) { "usage limit" } else { "codex exit $codexExitCode" }
 
         # The user explicitly authorized Claude Code as the unattended fallback.
         # Throttle it to one bounded invocation per six hours so a persistent
@@ -113,6 +115,7 @@ $prompt
         )
         Push-Location -LiteralPath $resolvedWorktree
         try {
+            Add-Content -LiteralPath $claudeLog -Value "fallback_reason=$failureReason"
             & claude @claudeArguments 2>&1 |
                 Tee-Object -FilePath $claudeLog
             if ($LASTEXITCODE -ne 0) {
