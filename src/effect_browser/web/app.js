@@ -1,4 +1,4 @@
-const state = { tasks: [], selected: null, detail: null };
+const state = { tasks: [], selected: null, detail: null, profiles: [], profile: null };
 const $ = (selector) => document.querySelector(selector);
 
 async function api(path, options = {}) {
@@ -226,6 +226,30 @@ function renderGate(action) {
   }
 }
 
+async function loadProfiles() {
+  state.profiles = await api("/v1/profiles");
+  const select = $("#profile-select");
+  const selected = select.value;
+  select.innerHTML = '<option value="">Create or select a profile</option>'
+    + state.profiles.map((profile) => `<option value="${profile.id}">${escapeHtml(profile.name)} (${profile.version})</option>`).join("");
+  select.value = state.profiles.some((profile) => profile.id === selected) ? selected : "";
+  if (select.value) await loadProfile(select.value);
+}
+
+async function loadProfile(id) {
+  if (!id) {
+    state.profile = null;
+    $("#answer-form").hidden = true;
+    $("#profile-answers").innerHTML = '<p class="empty">No profile selected.</p>';
+    return;
+  }
+  state.profile = await api(`/v1/profiles/${id}`);
+  $("#answer-form").hidden = false;
+  $("#profile-answers").innerHTML = state.profile.answers.length
+    ? state.profile.answers.map((answer) => `<div class="event"><strong>${escapeHtml(answer.field_name)}</strong><br>${escapeHtml(answer.value)}<br><small>${escapeHtml(answer.verification_state)} / ${escapeHtml(answer.sensitivity)}</small></div>`).join("")
+    : '<p class="empty">No answers yet.</p>';
+}
+
 async function verifyAudit() {
   try {
     const audit = await api("/v1/audit/verify");
@@ -255,6 +279,42 @@ $("#create-form").addEventListener("submit", async (event) => {
     toast("Durable plan created");
   });
 });
+$("#profile-select").addEventListener("change", (event) => loadProfile(event.target.value).catch((error) => toast(error.message)));
+$("#profile-create-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await mutate(event.submitter, async () => {
+    const profile = await api("/v1/profiles", {
+      method: "POST", body: JSON.stringify({ name: $("#profile-name").value }),
+    });
+    $("#profile-name").value = "";
+    await loadProfiles();
+    $("#profile-select").value = profile.id;
+    await loadProfile(profile.id);
+    toast("Profile created");
+  });
+});
+$("#answer-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.profile) return;
+  await mutate(event.submitter, async () => {
+    const answer = {
+      value: $("#answer-value").value,
+      source: { kind: $("#answer-source").value },
+      sensitivity: $("#answer-sensitivity").value,
+      verification_state: $("#answer-verified").checked ? "verified" : "unverified",
+      expected_version: state.profile.profile.version,
+    };
+    await api(`/v1/profiles/${state.profile.profile.id}/answers/${encodeURIComponent($("#answer-field").value)}`, {
+      method: "PUT", body: JSON.stringify(answer),
+    });
+    await loadProfiles();
+    await loadProfile(state.profile.profile.id);
+    $("#answer-field").value = "";
+    $("#answer-value").value = "";
+    $("#answer-verified").checked = false;
+    toast("Profile answer saved");
+  });
+});
 $("#run-task").addEventListener("click", (event) => mutate(
   event.currentTarget,
   () => api(`/v1/tasks/${state.selected}/run`, { method: "POST" }),
@@ -264,4 +324,4 @@ $("#refresh").addEventListener("click", async () => {
   if (state.selected) await selectTask(state.selected);
   await verifyAudit();
 });
-Promise.all([loadTasks(), verifyAudit()]).catch((error) => toast(error.message));
+Promise.all([loadTasks(), loadProfiles(), verifyAudit()]).catch((error) => toast(error.message));
