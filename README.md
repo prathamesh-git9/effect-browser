@@ -86,6 +86,13 @@ stored for the worker but is excluded from task API responses, prompts, and audi
 events. Upload candidates are converted to local deterministic actions; a remote model
 never receives or chooses the path.
 
+Read-only research is available through `POST /v1/research` or
+`effect-browser research`. It visits one to five configured HTTP(S) origins, captures
+the rendered title and excerpt, and returns a state hash plus evidence hash per source.
+Research never clicks, fills, uploads, logs in, submits, or books anything. It is a
+source-capture primitive, not a claim that page text is true; consequential actions
+remain behind the normal approval and authoritative-receipt gates.
+
 Submit approval is based on an abort-first network preview, not only the visible DOM.
 Effect Browser routes the click-generated request, records its method, redacted target,
 URL and wire-body evidence, canonical body hash, content type, parsed outgoing fields,

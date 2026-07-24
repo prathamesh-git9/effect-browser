@@ -60,6 +60,15 @@ Alert on repeated `409` conflicts, failed audit verification, tasks in
 `awaiting_recovery` or `awaiting_input`, and leases that expire while an action is
 `dispatching`.
 
+## Read-only research
+
+`POST /v1/research` and `effect-browser research` capture rendered evidence from up to
+five allowlisted origins. The response includes the observed URL, title, bounded text
+excerpt, page-state hash, and evidence hash. This mode has no submit or booking path;
+do not interpret a captured excerpt as independently verified truth. Configure
+`EFFECT_BROWSER_ALLOWED_ORIGINS` narrowly and use an authenticated proxy for shared
+deployments.
+
 ## Unknown-outcome recovery
 
 1. Do not click the target control manually or restart the action blindly.

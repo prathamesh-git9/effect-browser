@@ -27,6 +27,7 @@ from effect_browser.providers import (
     OpenAIReactivePlanner,
     ReactiveBootstrapPlanner,
 )
+from effect_browser.research import capture_research
 from effect_browser.store import DatabaseStore
 
 app = typer.Typer(no_args_is_help=True, help="Crash-safe browser operations.")
@@ -129,6 +130,25 @@ def run_task(task_id: UUID) -> None:
     finally:
         browser.close()
     console.print_json(result.model_dump_json())
+
+
+@app.command("research")
+def research(
+    question: str = typer.Argument(...),
+    urls: list[str] = typer.Argument(..., help="One to five allowlisted HTTP(S) URLs."),
+) -> None:
+    """Capture cited rendered source evidence without submitting forms."""
+    browser = _driver()
+    try:
+        report = capture_research(
+            question=question,
+            urls=tuple(urls),
+            driver=browser,
+            policy=_service().policy,
+        )
+    finally:
+        browser.close()
+    console.print_json(report.model_dump_json())
 
 
 @app.command()

@@ -38,6 +38,7 @@ from effect_browser.providers import (
     ProviderError,
     ReactiveBootstrapPlanner,
 )
+from effect_browser.research import capture_research
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 
 REQUESTS = Counter(
@@ -172,6 +173,11 @@ class PutProfileAnswerBody(BaseModel):
     sensitivity: AnswerSensitivity
     verification_state: VerificationState = VerificationState.UNVERIFIED
     expected_version: int | None = Field(default=None, ge=1)
+
+
+class ResearchBody(BaseModel):
+    question: str = Field(min_length=1, max_length=2_000)
+    urls: tuple[str, ...] = Field(min_length=1, max_length=5)
 
 
 app = FastAPI(
@@ -377,6 +383,25 @@ def run_task(
     browser = driver()
     try:
         return service.run(tenant_id=who.tenant_id, task_id=task_id, driver=browser)
+    finally:
+        browser.close()
+
+
+@app.post("/v1/research")
+def research(
+    body: ResearchBody,
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    """Capture allowlisted rendered sources without executing browser effects."""
+    browser = driver()
+    try:
+        return capture_research(
+            question=body.question,
+            urls=body.urls,
+            driver=browser,
+            policy=service.policy,
+        )
     finally:
         browser.close()
 
