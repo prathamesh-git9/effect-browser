@@ -1114,7 +1114,12 @@ class DatabaseStore:
             expected = row.observation_sha256
             proposal = ProposedAction.model_validate(row.proposal)
             if proposal.outgoing_review is not None:
-                proposal = proposal.model_copy(update={"outgoing_review": None})
+                proposal = proposal.model_copy(
+                    update={
+                        "outgoing_review": None,
+                        "planned_from_sha256": None,
+                    }
+                )
                 row.proposal = proposal.model_dump(mode="json")
                 row.action_sha256 = proposal.action_hash()
             row.state = ActionState.INVALIDATED.value

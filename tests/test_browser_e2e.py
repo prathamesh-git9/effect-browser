@@ -26,9 +26,30 @@ from effect_browser.uploads import sha256_file
 
 
 def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    # Chromium refuses a legacy blocklist of ports even on loopback. Letting the
+    # OS occasionally select one made otherwise deterministic E2E tests flaky.
+    unsafe = {
+        2049,
+        3659,
+        4045,
+        5060,
+        5061,
+        6000,
+        6566,
+        6665,
+        6666,
+        6667,
+        6668,
+        6669,
+        6697,
+        10080,
+    }
+    while True:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port not in unsafe:
+            return port
 
 
 def edge_executable() -> str | None:

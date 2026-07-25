@@ -52,6 +52,16 @@ VOLATILE_FIELD_NAMES = {
     "xsrf",
     "xsrf_token",
 }
+SECURITY_BOUND_HEADERS = {
+    "authorization",
+    "content-encoding",
+    "cookie",
+    "proxy-authorization",
+    "x-forward-to",
+    "x-http-method-override",
+    "x-original-url",
+    "x-rewrite-url",
+}
 
 
 class TransmissionReviewError(ValueError):
@@ -68,6 +78,7 @@ def fingerprint_request(
     url: str,
     headers: Mapping[str, str],
     body: bytes | None,
+    include_security_headers: bool = True,
 ) -> ReviewedRequest:
     raw_body = body or b""
     if len(raw_body) > MAX_REVIEWED_BODY_BYTES:
@@ -95,7 +106,7 @@ def fingerprint_request(
         if raw_body and media_type in SUPPORTED_BODY_TYPES
         else _raw_sha256(raw_body)
     )
-    request_body = {
+    request_body: dict[str, Any] = {
         "method": normalized_method,
         "target": _display_target(url),
         "url_sha256": _raw_sha256(url.encode("utf-8")),
@@ -104,6 +115,8 @@ def fingerprint_request(
         "fields": [field.model_dump(mode="json") for field in fields],
         "document_sha256s": list(document_sha256s),
     }
+    if include_security_headers:
+        request_body["security_headers_sha256"] = _security_headers_sha256(headers)
     return ReviewedRequest(
         **request_body,
         wire_body_sha256=_raw_sha256(raw_body),
@@ -120,6 +133,16 @@ def _content_type(headers: Mapping[str, str]) -> str:
     if not parts:
         return ""
     return ";".join([parts[0].casefold(), *sorted(parts[1:], key=str.casefold)])
+
+
+def _security_headers_sha256(headers: Mapping[str, str]) -> str:
+    """Bind headers that can change authorization, routing, or body semantics."""
+    bound = {
+        name.casefold(): value
+        for name, value in headers.items()
+        if name.casefold() in SECURITY_BOUND_HEADERS
+    }
+    return digest({"security_headers": dict(sorted(bound.items()))})
 
 
 def _query_fields(url: str) -> list[ReviewedRequestField]:
@@ -281,10 +304,9 @@ def _field(name: str, value: str) -> ReviewedRequestField:
         normalized == token or normalized.endswith(f"_{token}")
         for token in SENSITIVE_FIELD_NAMES
     )
-    volatile = any(
-        normalized == token or normalized.endswith(f"_{token}")
-        for token in VOLATILE_FIELD_NAMES
-    )
+    # Volatility is an exact-name exception, never a suffix heuristic. Otherwise
+    # a consequential field such as ``recipient_fingerprint`` could evade binding.
+    volatile = normalized in VOLATILE_FIELD_NAMES
     redacted = sensitive or volatile or len(value) > 10_000
     return ReviewedRequestField(
         name=name,

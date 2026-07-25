@@ -20,6 +20,7 @@ from effect_browser.domain import (
     PageSnapshot,
     PolicyDecision,
     ProposedAction,
+    ReconciliationSpec,
     RiskClass,
     TaskStatus,
     digest,
@@ -68,6 +69,143 @@ def test_external_commit_requires_bound_approval(service) -> None:
     assert paused.next_action.state is ActionState.APPROVAL_REQUIRED
     assert paused.next_action.observation_sha256
     assert remote.commits == 0
+
+
+def test_normal_run_never_follows_off_origin_reconciliation(service) -> None:
+    class OffOriginPlanner:
+        name = "off-origin-reconciliation"
+
+        @staticmethod
+        def plan(request):
+            reference = f"OFF-{str(request.task_id)[:8]}"
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the controlled target.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Commit once"),
+                    description="Commit one controlled effect.",
+                    effect_key=reference,
+                    expected_outcome="One controlled effect.",
+                    reconciliation=ReconciliationSpec(
+                        url="https://untrusted.example.test/echo",
+                        expected_text=reference,
+                        external_reference=reference,
+                    ),
+                ),
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    description="Finish only with authoritative evidence.",
+                ),
+            )
+
+    class ReconcileProbe(FakeDriver):
+        reconciliations = 0
+
+        def reconcile(self, spec):
+            self.reconciliations += 1
+            return super().reconcile(spec)
+
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Never leak a receipt lookup across the origin boundary.",
+        start_url=BASE_URL,
+        planner=OffOriginPlanner(),
+    )
+    first = ReconcileProbe(remote)
+    paused = service.run(tenant_id=TENANT, task_id=task.id, driver=first)
+    action = paused.next_action
+    assert action is not None
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=action.id,
+        expected_version=action.version,
+        actor_id="test-operator",
+    )
+
+    second = ReconcileProbe(remote)
+    stopped = service.run(tenant_id=TENANT, task_id=task.id, driver=second)
+
+    assert remote.commits == 1
+    assert second.reconciliations == 0
+    assert stopped.next_action is not None
+    assert stopped.next_action.state is ActionState.OUTCOME_UNKNOWN
+    assert "origin is not allowed" in stopped.message
+
+
+def test_rehydration_replays_reversible_option_clicks(service) -> None:
+    class OptionPlanner:
+        name = "option-replay"
+
+        @staticmethod
+        def plan(request):
+            reference = f"OPTION-{str(request.task_id)[:8]}"
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the controlled target.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.CLICK,
+                    locator=Locator(role="option", name="Dublin"),
+                    description="Select the observed reversible option.",
+                    target_interaction="option",
+                ),
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Commit once"),
+                    description="Commit the option-bound effect.",
+                    effect_key=reference,
+                    expected_outcome="One controlled effect.",
+                    reconciliation=ReconciliationSpec(
+                        url=f"{BASE_URL}/receipt",
+                        expected_text=reference,
+                        external_reference=reference,
+                    ),
+                ),
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    description="Finish with authoritative evidence.",
+                ),
+            )
+
+    class OptionDriver(FakeDriver):
+        option_clicks = 0
+
+        def execute(self, action):
+            if action.kind is ActionKind.CLICK:
+                self.option_clicks += 1
+            return super().execute(action)
+
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Replay reversible option state after restart.",
+        start_url=BASE_URL,
+        planner=OptionPlanner(),
+    )
+    first = OptionDriver(remote)
+    paused = service.run(tenant_id=TENANT, task_id=task.id, driver=first)
+    assert first.option_clicks == 1
+    action = paused.next_action
+    assert action is not None
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=action.id,
+        expected_version=action.version,
+        actor_id="test-operator",
+    )
+
+    restarted = OptionDriver(remote)
+    result = service.run(tenant_id=TENANT, task_id=task.id, driver=restarted)
+
+    assert restarted.option_clicks == 1
+    assert result.task.status is TaskStatus.SUCCEEDED
 
 
 def test_zero_request_submit_preview_can_be_audited_as_superseded(service) -> None:
@@ -308,6 +446,15 @@ def test_page_drift_invalidates_previous_approval(service) -> None:
     assert result.next_action.state is ActionState.INVALIDATED
     assert remote.commits == 0
     assert service.store.latest_approval(TENANT, approved.id) is not None
+
+    reviewed_again = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+    assert reviewed_again.next_action is not None
+    assert reviewed_again.next_action.state is ActionState.APPROVAL_REQUIRED
+    assert remote.commits == 0
 
 
 def test_stale_approval_version_is_rejected(service) -> None:

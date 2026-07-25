@@ -66,6 +66,55 @@ def test_volatile_security_tokens_do_not_invalidate_stable_application_review() 
     assert "token-one" not in first.model_dump_json()
 
 
+def test_token_like_suffix_and_security_routing_header_remain_bound() -> None:
+    def reviewed(recipient_fingerprint: str, forward_to: str):
+        return fingerprint_request(
+            method="POST",
+            url="https://jobs.example.test/api/applications",
+            headers={
+                "content-type": "application/json",
+                "x-forward-to": forward_to,
+            },
+            body=json.dumps(
+                {"recipient_fingerprint": recipient_fingerprint},
+                separators=(",", ":"),
+            ).encode(),
+        )
+
+    approved = reviewed("ledger-a", "primary")
+    changed_field = reviewed("ledger-b", "primary")
+    changed_header = reviewed("ledger-a", "secondary")
+
+    assert approved.request_sha256 != changed_field.request_sha256
+    assert approved.request_sha256 != changed_header.request_sha256
+
+
+def test_legacy_request_fingerprint_can_be_recreated_for_safe_dispatch() -> None:
+    headers = {
+        "content-type": "application/json",
+        "cookie": "session=legacy",
+    }
+    body = b'{"reference":"LEGACY-BOUND"}'
+
+    legacy = fingerprint_request(
+        method="POST",
+        url="https://jobs.example.test/api/applications",
+        headers=headers,
+        body=body,
+        include_security_headers=False,
+    )
+    current = fingerprint_request(
+        method="POST",
+        url="https://jobs.example.test/api/applications",
+        headers=headers,
+        body=body,
+    )
+
+    assert legacy.security_headers_sha256 is None
+    assert current.security_headers_sha256 is not None
+    assert legacy.request_sha256 != current.request_sha256
+
+
 def test_urlencoded_request_keeps_duplicate_fields_in_order() -> None:
     reviewed = fingerprint_request(
         method="POST",

@@ -165,6 +165,10 @@ class Locator(DomainModel):
         default=None,
         description="Scrapling relocation key associated with a selector strategy.",
     )
+    frame_path: tuple[str, ...] = Field(
+        default=(),
+        description="Exact iframe selectors from the top page to the target frame.",
+    )
 
     @model_validator(mode="after")
     def exactly_one_strategy(self) -> Locator:
@@ -179,6 +183,8 @@ class Locator(DomainModel):
             raise ValueError("accessible name is valid only with a role locator")
         if self.adaptive_id and not self.selector:
             raise ValueError("adaptive_id requires a selector locator")
+        if any(not selector.strip() for selector in self.frame_path):
+            raise ValueError("frame_path selectors cannot be blank")
         return self
 
 
@@ -226,6 +232,10 @@ class ReviewedRequest(DomainModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    security_headers_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     fields: tuple[ReviewedRequestField, ...] = ()
     document_sha256s: tuple[str, ...] = ()
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -239,6 +249,11 @@ class ReviewedRequest(DomainModel):
             "body_sha256": self.body_sha256,
             "fields": [field.model_dump(mode="json") for field in self.fields],
             "document_sha256s": list(self.document_sha256s),
+            **(
+                {"security_headers_sha256": self.security_headers_sha256}
+                if self.security_headers_sha256 is not None
+                else {}
+            ),
         }
 
     @model_validator(mode="after")
@@ -284,15 +299,11 @@ class OutgoingReview(DomainModel):
             for request in requests
             for document_sha256 in request.document_sha256s
         )
-        if (
-            self.document_sha256s
-            and captured_documents
-            and self.document_sha256s != captured_documents
-        ):
+        if self.document_sha256s and self.document_sha256s != captured_documents:
             raise ValueError(
                 "captured outgoing document bytes do not match the reviewed upload"
             )
-        document_sha256s = captured_documents or self.document_sha256s
+        document_sha256s = captured_documents
         body: dict[str, Any] = {
             "fields": [field.model_dump(mode="json") for field in self.fields],
             "document_sha256s": list(document_sha256s),

@@ -44,6 +44,7 @@ class ScraplingSnapshotter:
         state_sha256: str,
         max_candidates: int = 500,
         max_text: int = 8_000,
+        save_adaptive: bool = True,
     ) -> PageSnapshot:
         page = self._page(html, url)
         candidates: list[ElementCandidate] = []
@@ -60,9 +61,10 @@ class ScraplingSnapshotter:
             base_key = self._semantic_key(role, name, input_type)
             occurrence = semantic_counts.get(base_key, 0)
             semantic_counts[base_key] = occurrence + 1
-            adaptive_id = f"{base_key}:{occurrence}"
-            page.save(element, adaptive_id)
-            selector = str(element.generate_full_css_selector)
+            adaptive_id = f"{base_key}:{occurrence}" if save_adaptive else None
+            if adaptive_id is not None:
+                page.save(element, adaptive_id)
+            selector = self._selector(page, element)
             href = (
                 urljoin(url, str(element.attrib["href"]))
                 if element.attrib.get("href")
@@ -220,6 +222,19 @@ class ScraplingSnapshotter:
     def _semantic_key(role: str, name: str, input_type: str | None) -> str:
         raw = f"{role}|{name.casefold()}|{input_type or ''}"
         return f"candidate-{digest(raw)[:20]}"
+
+    @staticmethod
+    def _selector(page: Selector, element: ScraplingElement) -> str:
+        """Prefer identity selectors that also work through open shadow roots."""
+        for attribute in ("id", "data-testid"):
+            value = str(element.attrib.get(attribute, "")).strip()
+            if not value:
+                continue
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            selector = f'[{attribute}="{escaped}"]'
+            if len(page.css(selector)) == 1:
+                return selector
+        return str(element.generate_full_css_selector)
 
     @staticmethod
     def _interaction(

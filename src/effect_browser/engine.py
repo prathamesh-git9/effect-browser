@@ -218,20 +218,19 @@ class EffectBrowserService:
                     current.proposal,
                     restored_observation.state_sha256,
                 )
-                if (
-                    restored_review.observation_sha256
-                    != current.proposal.outgoing_review.observation_sha256
-                    or restored_review.fields != current.proposal.outgoing_review.fields
-                    or restored_review.document_sha256s
-                    != current.proposal.outgoing_review.document_sha256s
-                    or tuple(
+                payload_matches = (
+                    restored_review.fields == current.proposal.outgoing_review.fields
+                    and restored_review.document_sha256s
+                    == current.proposal.outgoing_review.document_sha256s
+                    and tuple(
                         request.request_sha256 for request in restored_review.requests
                     )
-                    != tuple(
+                    == tuple(
                         request.request_sha256
                         for request in current.proposal.outgoing_review.requests
                     )
-                ):
+                )
+                if not payload_matches:
                     self.store.start_dispatch(tenant_id, current.id)
                     failed = self.store.fail_action(
                         tenant_id,
@@ -245,8 +244,28 @@ class EffectBrowserService:
                         task=self.store.get_task(tenant_id, task_id),
                         next_action=failed,
                         message=(
-                            "restored outgoing request or preview state differs from "
-                            "the approved review and was blocked before transmission"
+                            "restored outgoing request differs from the approved "
+                            "review and was blocked before transmission"
+                        ),
+                    )
+                if (
+                    restored_review.observation_sha256
+                    != current.proposal.outgoing_review.observation_sha256
+                ):
+                    # Rehydration and preview sent no write. A real change therefore
+                    # invalidates the approval and returns the action to the normal
+                    # review path instead of permanently failing a durable task.
+                    invalidated = self.store.invalidate_approval(
+                        tenant_id,
+                        current.id,
+                        restored_review.observation_sha256,
+                    )
+                    return RunResult(
+                        task=self.store.get_task(tenant_id, task_id),
+                        next_action=invalidated,
+                        message=(
+                            "page changed during crash-safe restoration; the prior "
+                            "approval was invalidated before transmission"
                         ),
                     )
 
@@ -502,6 +521,23 @@ class EffectBrowserService:
                                 "as proof"
                             ),
                         )
+                    if not self.policy.allows_url(spec.url):
+                        unknown = self.store.mark_outcome_unknown(
+                            tenant_id,
+                            action.id,
+                            (
+                                "submit completed but its reconciliation URL "
+                                "crosses the configured origin boundary"
+                            ),
+                        )
+                        return RunResult(
+                            task=self.store.get_task(tenant_id, task_id),
+                            next_action=unknown,
+                            message=(
+                                "submit is unverified; the reconciliation origin "
+                                "is not allowed"
+                            ),
+                        )
                     receipt = driver.reconcile(spec)
                     if receipt is None:
                         unknown = self.store.mark_outcome_unknown(
@@ -664,13 +700,20 @@ class EffectBrowserService:
                 break
             if action.state is not ActionState.SUCCEEDED:
                 continue
-            if action.proposal.kind in {
-                ActionKind.NAVIGATE,
-                ActionKind.FILL,
-                ActionKind.CHECK,
-                ActionKind.PRESS,
-                ActionKind.CLICK,
-            } or (replay_uploads and action.proposal.kind is ActionKind.UPLOAD):
+            if (
+                action.proposal.kind
+                in {
+                    ActionKind.NAVIGATE,
+                    ActionKind.FILL,
+                    ActionKind.CHECK,
+                    ActionKind.PRESS,
+                }
+                or (
+                    action.proposal.kind is ActionKind.CLICK
+                    and action.proposal.target_interaction in {"navigation", "option"}
+                )
+                or (replay_uploads and action.proposal.kind is ActionKind.UPLOAD)
+            ):
                 driver.execute(action.proposal)
 
     @staticmethod

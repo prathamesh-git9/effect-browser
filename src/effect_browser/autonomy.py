@@ -47,6 +47,10 @@ def auto_approval_reason(
         return None
     if len(proposal.outgoing_review.requests) != 1:
         return None
+    if task_document is not None:
+        _document_path, document_sha256 = task_document
+        if proposal.outgoing_review.document_sha256s != (document_sha256,):
+            return None
 
     committed_or_in_flight = sum(
         candidate.id != action.id

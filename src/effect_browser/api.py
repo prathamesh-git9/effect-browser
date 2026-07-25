@@ -29,6 +29,7 @@ from effect_browser.domain import (
     VerificationState,
 )
 from effect_browser.engine import EffectBrowserService
+from effect_browser.hard_target import create_hard_target_router
 from effect_browser.job_target import create_demo_job_router
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import (
@@ -130,6 +131,7 @@ def driver() -> PlaywrightDriver:
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
         allowed_upload_origins=settings.allowed_upload_origins,
+        allowed_origins=settings.allowed_origins,
     )
 
 
@@ -520,6 +522,7 @@ def verify_audit(
 app.include_router(create_demo_router(get_store))
 app.include_router(create_demo_job_router(get_store))
 app.include_router(create_capability_router())
+app.include_router(create_hard_target_router())
 
 web_dir = Path(__file__).parent / "web"
 app.mount("/assets", StaticFiles(directory=web_dir), name="assets")

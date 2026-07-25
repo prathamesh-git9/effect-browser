@@ -75,6 +75,7 @@ def _driver() -> PlaywrightDriver:
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
         allowed_upload_origins=settings.allowed_upload_origins,
+        allowed_origins=settings.allowed_origins,
     )
 
 

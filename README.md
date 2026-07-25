@@ -126,6 +126,8 @@ Scrapling's role and limitations are recorded in
 contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).
 The unattended authority contract is
 [docs/BOUNDED_AUTONOMY.md](docs/BOUNDED_AUTONOMY.md).
+The ten-scenario hostile browser campaign and its remaining limitations are in
+[docs/ADVERSARIAL_BROWSER_MATRIX.md](docs/ADVERSARIAL_BROWSER_MATRIX.md).
 
 Run the durable polling worker separately when tasks should progress without an open
 dashboard. Supervised tasks stop at commit approval. Bounded tasks automatically
