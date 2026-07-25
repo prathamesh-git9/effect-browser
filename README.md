@@ -1,6 +1,7 @@
 # Effect Browser
 
-Effect Browser is a crash-safe control plane for AI-driven browser operations. It is
+Effect Browser is a one-query, crash-safe control plane for AI-driven browser
+operations. It is
 not another “click things with an LLM” wrapper. It focuses on the failure ordinary
 browser agents handle badly: the target may commit an external action just before the
 browser or worker crashes.
@@ -14,6 +15,29 @@ business reference or receipt.
 
 Read the [research decision](docs/RESEARCH.md) and [technical spec](docs/SPEC.md).
 Deployment and recovery procedures are in the [operations runbook](docs/OPERATIONS.md).
+The exact one-query capability and its hard limits are in
+[the autopilot contract](docs/AUTOPILOT.md).
+
+## One-query mode
+
+Configure `OPENAI_API_KEY` or `XAI_API_KEY`, then give the normal path only a query:
+
+```powershell
+effect-browser do "Check the status at https://status.example.com"
+```
+
+If the query has no URL, the selected provider must use hosted web search to ground a
+start page. If the query names an external effect such as `apply`, `book`, `order`, or
+`submit`, it pre-authorizes at most one reviewed commit. The command exits successfully
+only for `verified_success`; a model saying it finished is insufficient.
+
+Read-only navigation ends as `unverified` unless the task produces a deterministic
+goal-specific receipt. A final page hash is evidence for inspection, not proof that the
+model interpreted the user's goal correctly.
+
+This is not a promise to complete every website. CAPTCHA/MFA, credentials, payments,
+missing verified facts, unsupported multi-write flows, and unprovable outcomes return
+a truthful pause or failure verdict.
 
 ## Honest guarantee
 
@@ -144,15 +168,15 @@ effect-browser killer-demo
 
 ## Providers
 
-The default deterministic planner drives the demo and tests. OpenAI and Grok implement
-the same JSON plan contract:
+The deterministic planner drives the demo and tests. One-query public-web runs select
+an available reactive provider automatically, or you can pin one:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:EFFECT_BROWSER_PROVIDER = "openai"
+$env:EFFECT_BROWSER_PROVIDER = "openai-reactive"
 
 $env:XAI_API_KEY = "..."
-$env:EFFECT_BROWSER_PROVIDER = "grok"
+$env:EFFECT_BROWSER_PROVIDER = "grok-reactive"
 ```
 
 Provider output never directly invokes Playwright. It is validated, stored, classified

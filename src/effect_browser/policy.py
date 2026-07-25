@@ -51,9 +51,14 @@ class ActionPolicy:
         self.allowed_origins = {item.rstrip("/") for item in allowed_origins}
         self.upload_guard = UploadGuard(allowed_upload_roots)
 
-    def evaluate(self, action: ProposedAction, current_url: str) -> PolicyDecision:
+    def evaluate(
+        self,
+        action: ProposedAction,
+        current_url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> PolicyDecision:
         target_url = action.url or current_url
-        if target_url and not self._origin_allowed(target_url):
+        if target_url and not self._origin_allowed(target_url, extra_allowed_origins):
             return PolicyDecision(
                 allowed=False,
                 risk=RiskClass.READ,
@@ -200,7 +205,7 @@ class ActionPolicy:
                     reason="outgoing payload review is not bound to the planned page",
                 )
             request = action.outgoing_review.requests[0]
-            if not self._origin_allowed(request.target):
+            if not self._origin_allowed(request.target, extra_allowed_origins):
                 return PolicyDecision(
                     allowed=False,
                     risk=RiskClass.EXTERNAL_COMMIT,
@@ -223,12 +228,23 @@ class ActionPolicy:
             reason="read or local navigation action",
         )
 
-    def _origin_allowed(self, url: str) -> bool:
-        return self._origin(url) in self.allowed_origins
+    def _origin_allowed(
+        self,
+        url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> bool:
+        allowed = self.allowed_origins | {
+            self._origin(item) for item in extra_allowed_origins
+        }
+        return self._origin(url) in allowed
 
-    def allows_url(self, url: str) -> bool:
+    def allows_url(
+        self,
+        url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> bool:
         """Return whether browser egress to this URL is within the configured policy."""
-        return self._origin_allowed(url)
+        return self._origin_allowed(url, extra_allowed_origins)
 
     @staticmethod
     def _origin(url: str) -> str:

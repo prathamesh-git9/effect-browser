@@ -28,6 +28,7 @@ from effect_browser.domain import (
 )
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlanner
+from effect_browser.providers.base import ProviderError
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 from effect_browser.transmission import TransmissionReviewError, fingerprint_request
 
@@ -259,6 +260,14 @@ def test_bounded_autonomy_commits_without_per_action_intervention(service) -> No
             max_external_commits=1,
         ),
     )
+
+    reviewed = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+    assert reviewed.next_action is not None
+    assert reviewed.next_action.state is ActionState.PREPARED
 
     result = service.run(
         tenant_id=TENANT,
@@ -790,3 +799,86 @@ def test_reactive_task_requires_verified_fact_before_planner_can_guess(
     )
     assert resumed.state is ActionState.SUCCEEDED
     assert service.store.get_task(TENANT, task.id).status is TaskStatus.QUEUED
+
+
+def test_reactive_provider_failure_becomes_truthful_blocker(service) -> None:
+    class FailingPlanner:
+        name = "failing-reactive"
+
+        def choose(self, _request):
+            raise ProviderError("synthetic provider outage")
+
+    class SnapshotDriver(FakeDriver):
+        def snapshot(self) -> PageSnapshot:
+            observation = self.observe()
+            return PageSnapshot(
+                url=observation.url,
+                title=observation.title,
+                state_sha256=observation.state_sha256,
+                text_excerpt="No challenge and no controls.",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+
+    service.step_planners = {"failing-reactive": FailingPlanner()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Stop honestly if planning is unavailable.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner("failing-reactive"),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=SnapshotDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.BLOCKED
+    assert result.next_action is None
+    assert "success is not claimed" in result.message
+
+
+def test_reactive_step_budget_blocks_instead_of_overflowing_schema(service) -> None:
+    class ThirtyStepPlanner:
+        name = "step-budget"
+
+        def plan(self, _request):
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the bounded target.",
+                ),
+                *(
+                    ProposedAction(
+                        kind=ActionKind.WAIT,
+                        wait_ms=100,
+                        description=f"Bounded wait {number}.",
+                    )
+                    for number in range(1, 30)
+                ),
+            )
+
+    class MustNotChoose:
+        name = "step-budget"
+
+        def choose(self, _request):
+            raise AssertionError("provider must not run after the 30-step budget")
+
+    service.step_planners = {"step-budget": MustNotChoose()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Never run more than thirty browser steps.",
+        start_url=BASE_URL,
+        planner=ThirtyStepPlanner(),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.BLOCKED
+    assert "step budget exhausted" in result.message

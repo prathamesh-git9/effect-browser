@@ -119,7 +119,9 @@ function render() {
   $("#task-id").textContent = `TASK ${task.id}`;
   $("#task-title").textContent = task.instruction;
   $("#task-status").textContent = task.status.replaceAll("_", " ");
-  $("#run-note").textContent = task.autonomy.mode === "bounded"
+  $("#run-note").textContent = task.autonomy.allow_query_target_origin
+    ? `One-query run / max ${task.autonomy.max_external_commits} external commits / proof required`
+    : task.autonomy.mode === "bounded"
     ? `Bounded unattended / max ${task.autonomy.max_external_commits} external commits`
     : "Safe actions run automatically; external effects require approval.";
   $("#action-count").textContent = `${actions.length} actions / cursor ${task.current_ordinal}`;
@@ -263,6 +265,21 @@ async function verifyAudit() {
     $("#audit-state").textContent = "Ledger unavailable";
   }
 }
+
+$("#autopilot-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await mutate(event.submitter, async () => {
+    const result = await api("/v1/autopilot", {
+      method: "POST",
+      body: JSON.stringify({ query: $("#autopilot-query").value }),
+    });
+    state.selected = result.task.id;
+    const message = result.verdict === "verified_success"
+      ? `Verified success / ${result.evidence.length} receipts`
+      : `${result.verdict.replaceAll("_", " ")} / ${result.message}`;
+    toast(message);
+  });
+});
 
 $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();

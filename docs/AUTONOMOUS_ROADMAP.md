@@ -7,8 +7,9 @@ CI.
 
 ## Product contract
 
-Given a natural-language instruction and a starting URL, Effect Browser opens a
-real browser, repeatedly observes the current page, chooses one action from
+Given one natural-language query, Effect Browser resolves or validates a starting
+URL, selects the configured provider/profile/document authority, opens a real browser,
+repeatedly observes the current page, chooses one action from
 freshly discovered candidates, executes it through deterministic policy, and
 continues until it completes, pauses for user authority, or reports an honest
 blocker.
@@ -34,6 +35,11 @@ Visible success text alone can never produce `SUBMITTED_VERIFIED`.
 ## Acceptance criteria
 
 - [x] A reactive provider observes the page before every planned action.
+- [x] CLI, HTTP, MCP, and dashboard accept one query as the normal execution input.
+- [x] URL-free queries require provider-hosted web-search evidence instead of a
+      model-memory guess.
+- [x] A receipt evaluator rejects model-declared completion when the requested
+      external effect is not independently proven.
 - [x] The model can select only candidates present in the fresh snapshot.
 - [x] Scrapling generates candidates and relocates a saved element after DOM drift.
 - [x] Links, reversible controls, ambiguous clicks, and commits receive different

@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     )
     allowed_upload_roots: Annotated[tuple[Path, ...], NoDecode] = ()
     allowed_upload_origins: Annotated[tuple[str, ...], NoDecode] = ()
-    provider: str = "deterministic"
+    provider: str = "auto"
     openai_model: str = "gpt-5.6"
     grok_model: str = "grok-4.5"
+    default_profile_id: UUID | None = None
+    default_document_path: Path | None = None
     browser_executable: str | None = None
     browser_headless: bool = True
     browser_sandbox: bool = True

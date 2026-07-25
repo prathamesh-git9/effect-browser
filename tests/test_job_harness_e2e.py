@@ -120,7 +120,7 @@ def prepare_application(base_url: str, mode: str):
 
 
 @pytest.mark.e2e
-def test_bounded_autonomy_runs_dynamic_upload_and_commit_without_pause(
+def test_bounded_autonomy_runs_upload_and_commit_across_fresh_session(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -147,15 +147,28 @@ def test_bounded_autonomy_runs_dynamic_upload_and_commit_without_pause(
                 max_external_commits=1,
             ),
         )
-        runner = browser()
+        preview_runner = browser()
+        try:
+            reviewed = service.run(
+                tenant_id=settings.default_tenant_id,
+                task_id=task.id,
+                driver=preview_runner,
+            )
+        finally:
+            preview_runner.close()
+        assert reviewed.next_action is not None
+        assert reviewed.next_action.state is ActionState.PREPARED
+        assert "fresh browser session" in reviewed.message
+
+        dispatch_runner = browser()
         try:
             result = service.run(
                 tenant_id=settings.default_tenant_id,
                 task_id=task.id,
-                driver=runner,
+                driver=dispatch_runner,
             )
         finally:
-            runner.close()
+            dispatch_runner.close()
 
         ledger = httpx.get(
             f"{base_url}/demo-jobs/api/applications",

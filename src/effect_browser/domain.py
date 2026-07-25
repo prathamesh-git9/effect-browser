@@ -48,6 +48,7 @@ class AutonomyScope(DomainModel):
     """Task-level authority granted before unattended execution starts."""
 
     mode: AutonomyMode = AutonomyMode.SUPERVISED
+    allow_query_target_origin: bool = False
     allow_file_uploads: bool = False
     allow_external_commits: bool = False
     max_external_commits: int = Field(default=0, ge=0, le=3)
@@ -55,7 +56,8 @@ class AutonomyScope(DomainModel):
     @model_validator(mode="after")
     def validate_scope(self) -> AutonomyScope:
         if self.mode is AutonomyMode.SUPERVISED and (
-            self.allow_file_uploads
+            self.allow_query_target_origin
+            or self.allow_file_uploads
             or self.allow_external_commits
             or self.max_external_commits
         ):

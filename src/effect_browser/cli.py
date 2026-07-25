@@ -10,6 +10,7 @@ import typer
 import uvicorn
 from rich.console import Console
 
+from effect_browser.autopilot import AutopilotCoordinator, AutopilotVerdict
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.capabilities import capability_catalog
 from effect_browser.config import get_settings
@@ -31,7 +32,7 @@ from effect_browser.providers import (
 from effect_browser.research import capture_research
 from effect_browser.store import DatabaseStore
 
-app = typer.Typer(no_args_is_help=True, help="Crash-safe browser operations.")
+app = typer.Typer(no_args_is_help=True, help="One-query, crash-safe browser operations.")
 console = Console()
 
 
@@ -66,7 +67,7 @@ def _planner(name: str):
     return values[name]
 
 
-def _driver() -> PlaywrightDriver:
+def _driver(extra_allowed_origins: tuple[str, ...] = ()) -> PlaywrightDriver:
     settings = get_settings()
     return PlaywrightDriver(
         executable_path=settings.browser_executable,
@@ -75,8 +76,16 @@ def _driver() -> PlaywrightDriver:
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
         allowed_upload_origins=settings.allowed_upload_origins,
-        allowed_origins=settings.allowed_origins,
+        allowed_origins=(*settings.allowed_origins, *extra_allowed_origins),
     )
+
+
+def _absolute_document_path(document_path: Path | None) -> Path | None:
+    if document_path is None:
+        return None
+    if not document_path.is_absolute():
+        raise typer.BadParameter("document_path must be absolute")
+    return document_path.resolve()
 
 
 @app.command("init")
@@ -128,7 +137,7 @@ def create_task(
         start_url=start_url,
         planner=_planner(provider),
         profile_id=profile_id,
-        document_path=document_path.resolve() if document_path else None,
+        document_path=_absolute_document_path(document_path),
         document_sha256=document_sha256,
         autonomy=AutonomyScope(
             mode=autonomy_mode,
@@ -140,13 +149,32 @@ def create_task(
     console.print_json(task.model_dump_json())
 
 
+@app.command("do")
+def do_browser_task(query: str = typer.Argument(...)) -> None:
+    """Resolve and run one browser task from one natural-language query."""
+    settings = get_settings()
+    result = AutopilotCoordinator(
+        service=_service(),
+        settings=settings,
+    ).execute(
+        tenant_id=settings.default_tenant_id,
+        query=query,
+    )
+    console.print_json(result.model_dump_json())
+    if result.verdict is not AutopilotVerdict.VERIFIED_SUCCESS:
+        raise typer.Exit(2)
+
+
 @app.command("run")
 def run_task(task_id: UUID) -> None:
     """Run safe actions until approval, recovery, failure, or completion."""
     settings = get_settings()
-    browser = _driver()
+    service = _service()
+    task = service.store.get_task(settings.default_tenant_id, task_id)
+    extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+    browser = _driver(extra_origins)
     try:
-        result = _service().run(
+        result = service.run(
             tenant_id=settings.default_tenant_id,
             task_id=task_id,
             driver=browser,
@@ -338,16 +366,22 @@ def worker(
             )
         ]
         for task in runnable:
-            browser = _driver()
+            extra_origins = (
+                (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+            )
             try:
-                result = service.run(
-                    tenant_id=settings.default_tenant_id,
-                    task_id=task.id,
-                    driver=browser,
-                )
-                console.print(f"{task.id}: {result.message}")
-            finally:
-                browser.close()
+                browser = _driver(extra_origins)
+                try:
+                    result = service.run(
+                        tenant_id=settings.default_tenant_id,
+                        task_id=task.id,
+                        driver=browser,
+                    )
+                    console.print(f"{task.id}: {result.message}")
+                finally:
+                    browser.close()
+            except Exception as exc:
+                console.print(f"[red]{task.id}: {type(exc).__name__}: {exc}[/red]")
         if once:
             return
         time.sleep(poll_seconds)

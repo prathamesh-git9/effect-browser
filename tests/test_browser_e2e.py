@@ -11,6 +11,7 @@ import pytest
 import uvicorn
 
 from effect_browser import api
+from effect_browser.autopilot import AutopilotResult, AutopilotVerdict
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
 from effect_browser.domain import (
@@ -267,6 +268,68 @@ def test_real_browser_crash_reconciles_one_order(tmp_path: Path, monkeypatch) ->
         assert len(matching) == 1
         assert matching[0]["duplicate_attempts"] == 0
         assert service.store.verify_audit(tenant).valid is True
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_one_query_autopilot_proves_real_browser_completion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'autopilot-e2e.db'}",
+    )
+    monkeypatch.setenv("EFFECT_BROWSER_ALLOWED_ORIGINS", base_url)
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_ARTIFACTS_DIRECTORY",
+        str(tmp_path / "artifacts"),
+    )
+    if executable := edge_executable():
+        monkeypatch.setenv("EFFECT_BROWSER_BROWSER_EXECUTABLE", executable)
+    get_settings.cache_clear()
+    api.get_store.cache_clear()
+    server = uvicorn.Server(
+        uvicorn.Config(api.app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_until_ready(base_url)
+
+    try:
+        response = httpx.post(
+            f"{base_url}/v1/autopilot",
+            json={
+                "query": (
+                    "Order three encrypted backup drives at "
+                    f"{base_url} without a duplicate order."
+                )
+            },
+            timeout=90,
+        )
+        assert response.status_code == 200
+        result = AutopilotResult.model_validate(response.json())
+        submit_evidence = [
+            item for item in result.evidence if item.kind is ActionKind.SUBMIT
+        ]
+        orders = httpx.get(f"{base_url}/demo-shop/api/orders", timeout=5).json()
+        matching = [
+            row
+            for row in orders
+            if submit_evidence and row["reference"] == submit_evidence[0].effect_key
+        ]
+
+        assert result.verdict is AutopilotVerdict.VERIFIED_SUCCESS
+        assert result.task.status is TaskStatus.SUCCEEDED
+        assert len(submit_evidence) == 1
+        assert len(matching) == 1
+        assert matching[0]["duplicate_attempts"] == 0
     finally:
         server.should_exit = True
         thread.join(timeout=10)

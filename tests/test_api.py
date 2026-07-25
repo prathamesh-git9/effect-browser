@@ -26,7 +26,21 @@ def test_health_ui_and_request_id(tmp_path: Path, monkeypatch) -> None:
 
     assert health.json() == {"status": "ok"}
     assert health.headers["X-Request-ID"] == "known-request"
-    assert "The ledger decides" in dashboard.text
+    assert "Say the outcome" in dashboard.text
+
+
+def test_unmatched_metrics_paths_use_one_bounded_label(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with client_for(tmp_path, monkeypatch) as client:
+        client.get("/random-scanner-path-one")
+        client.get("/random-scanner-path-two")
+        metrics = client.get("/metrics")
+
+    assert 'path="<unmatched>"' in metrics.text
+    assert "random-scanner-path-one" not in metrics.text
+    assert "random-scanner-path-two" not in metrics.text
 
 
 def test_create_list_detail_and_audit(tmp_path: Path, monkeypatch) -> None:
@@ -47,6 +61,7 @@ def test_create_list_detail_and_audit(tmp_path: Path, monkeypatch) -> None:
     assert created.status_code == 201
     assert created.json()["autonomy"] == {
         "mode": "supervised",
+        "allow_query_target_origin": False,
         "allow_file_uploads": False,
         "allow_external_commits": False,
         "max_external_commits": 0,
@@ -87,6 +102,18 @@ def test_api_records_bounded_authority_and_exposes_capabilities(
                 },
             },
         )
+        reserved_origin = client.post(
+            "/v1/tasks",
+            json={
+                "instruction": "Try to bypass target validation.",
+                "start_url": "http://127.0.0.1:9999/private",
+                "provider": "deterministic",
+                "autonomy": {
+                    "mode": "bounded",
+                    "allow_query_target_origin": True,
+                },
+            },
+        )
 
     assert created.status_code == 201
     assert created.json()["autonomy"]["mode"] == "bounded"
@@ -101,6 +128,35 @@ def test_api_records_bounded_authority_and_exposes_capabilities(
         "submit",
     }
     assert invalid.status_code == 422
+    assert reserved_origin.status_code == 422
+    assert "reserved for the validated" in reserved_origin.text
+
+
+def test_autopilot_api_accepts_only_a_natural_language_query(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class StubCoordinator:
+        def execute(self, *, tenant_id, query):
+            return {
+                "tenant_id": str(tenant_id),
+                "query": query,
+                "verdict": "verified_success",
+            }
+
+    api.app.dependency_overrides[api.get_autopilot] = lambda: StubCoordinator()
+    try:
+        with client_for(tmp_path, monkeypatch) as client:
+            response = client.post(
+                "/v1/autopilot",
+                json={"query": "Inspect the status at https://example.com/status."},
+            )
+    finally:
+        api.app.dependency_overrides.pop(api.get_autopilot, None)
+
+    assert response.status_code == 200
+    assert response.json()["query"].startswith("Inspect the status")
+    assert response.json()["verdict"] == "verified_success"
 
 
 def test_cross_tenant_task_is_hidden(tmp_path: Path, monkeypatch) -> None:

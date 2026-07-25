@@ -4,8 +4,19 @@ from pathlib import Path
 from uuid import UUID
 
 from effect_browser.api import driver, get_service, planner
+from effect_browser.autopilot import AutopilotCoordinator
 from effect_browser.capabilities import capability_catalog
+from effect_browser.config import get_settings
 from effect_browser.domain import AutonomyScope
+
+
+def _absolute_document_path(document_path: str | None) -> Path | None:
+    if document_path is None:
+        return None
+    path = Path(document_path)
+    if not path.is_absolute():
+        raise ValueError("document_path must be absolute")
+    return path.resolve()
 
 
 def create_mcp_server():
@@ -15,6 +26,19 @@ def create_mcp_server():
         raise RuntimeError("install effect-browser[mcp] to run the MCP server") from exc
 
     server = FastMCP("effect-browser")
+
+    @server.tool()
+    def do_browser_task(query: str) -> dict:
+        """Resolve, run, and prove one browser task from this query alone."""
+        settings = get_settings()
+        result = AutopilotCoordinator(
+            service=get_service(),
+            settings=settings,
+        ).execute(
+            tenant_id=settings.default_tenant_id,
+            query=query,
+        )
+        return result.model_dump(mode="json")
 
     @server.tool()
     def create_browser_task(
@@ -31,13 +55,18 @@ def create_mcp_server():
         max_external_commits: int = 0,
     ) -> dict:
         """Plan and persist a browser task; this does not execute browser actions."""
+        resolved_document_path = _absolute_document_path(document_path)
         task = get_service().create_task(
             tenant_id=UUID(tenant_id),
             instruction=instruction,
             start_url=start_url,
             planner=planner(provider),
             profile_id=UUID(profile_id) if profile_id else None,
-            document_path=Path(document_path).resolve() if document_path else None,
+            document_path=(
+                resolved_document_path.resolve()
+                if resolved_document_path is not None
+                else None
+            ),
             document_sha256=document_sha256,
             autonomy=AutonomyScope(
                 mode=autonomy_mode,
@@ -83,11 +112,16 @@ def create_mcp_server():
     def run_browser_task(tenant_id: str, task_id: str) -> dict:
         """Run until completion or an honest authority, input, or recovery blocker."""
         service = get_service()
-        browser = driver()
+        tenant = UUID(tenant_id)
+        task = service.store.get_task(tenant, UUID(task_id))
+        extra_origins = (
+            (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+        )
+        browser = driver(extra_origins)
         try:
             result = service.run(
-                tenant_id=UUID(tenant_id),
-                task_id=UUID(task_id),
+                tenant_id=tenant,
+                task_id=task.id,
                 driver=browser,
             )
         finally:

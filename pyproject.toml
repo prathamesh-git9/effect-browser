@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "effect-browser"
-version = "0.2.0"
-description = "Crash-safe browser operations with approval-bound external effects."
+version = "0.3.0"
+description = "One-query browser automation with crash-safe, receipt-backed effects."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"

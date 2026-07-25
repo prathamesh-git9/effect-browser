@@ -25,7 +25,7 @@ from effect_browser.domain import (
 )
 from effect_browser.factual import deterministic_required_choice, planning_facts
 from effect_browser.policy import ActionPolicy
-from effect_browser.providers.base import Planner, StepPlanner
+from effect_browser.providers.base import Planner, ProviderError, StepPlanner
 from effect_browser.providers.reactive import bind_choice
 from effect_browser.store import ConflictError, DatabaseStore
 from effect_browser.transmission import TransmissionBlocked
@@ -277,10 +277,28 @@ class EffectBrowserService:
                 owner=worker_id,
             )
             task = self.store.get_task(tenant_id, task_id)
+            query_origins = (
+                (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+            )
             action = self.store.current_action(tenant_id, task_id)
             if action is None:
                 step_planner = self.step_planners.get(task.provider)
                 if step_planner is not None:
+                    if task.current_ordinal >= 30:
+                        blocked = self.store.block_task(
+                            tenant_id,
+                            task_id,
+                            kind="step_budget_exhausted",
+                            reason=(
+                                "the browser reached its 30-step execution limit "
+                                "without verified completion"
+                            ),
+                            evidence=f"current_ordinal={task.current_ordinal}",
+                        )
+                        return RunResult(
+                            task=blocked,
+                            message=("step budget exhausted; success is not claimed"),
+                        )
                     snapshot = driver.snapshot()
                     challenge = detect_challenge(snapshot)
                     if challenge is not None:
@@ -330,7 +348,22 @@ class EffectBrowserService:
                         document_sha256=document[1] if document else None,
                     )
                     if choice is None:
-                        choice = step_planner.choose(request)
+                        try:
+                            choice = step_planner.choose(request)
+                        except ProviderError as exc:
+                            blocked = self.store.block_task(
+                                tenant_id,
+                                task_id,
+                                kind="provider_error",
+                                reason=str(exc),
+                                evidence=task.provider,
+                            )
+                            return RunResult(
+                                task=blocked,
+                                message=(
+                                    "the planning provider failed; success is not claimed"
+                                ),
+                            )
                     action = self.store.append_action(
                         tenant_id=tenant_id,
                         task_id=task_id,
@@ -377,6 +410,18 @@ class EffectBrowserService:
                 )
             if action.state is ActionState.APPROVAL_REQUIRED:
                 action = self._auto_approve(task, action)
+                if (
+                    action.state is ActionState.PREPARED
+                    and action.proposal.kind is ActionKind.SUBMIT
+                ):
+                    return RunResult(
+                        task=self.store.get_task(tenant_id, task_id),
+                        next_action=action,
+                        message=(
+                            "exact submit review was authorized; resume in a fresh "
+                            "browser session for crash-safe dispatch"
+                        ),
+                    )
             if action.state is ActionState.APPROVAL_REQUIRED:
                 return RunResult(
                     task=task,
@@ -401,7 +446,11 @@ class EffectBrowserService:
                     action.proposal.planned_from_sha256
                     and action.proposal.planned_from_sha256 != observation.state_sha256
                 ):
-                    decision = self.policy.evaluate(action.proposal, observation.url)
+                    decision = self.policy.evaluate(
+                        action.proposal,
+                        observation.url,
+                        query_origins,
+                    )
                     decision = decision.model_copy(
                         update={
                             "allowed": False,
@@ -449,11 +498,13 @@ class EffectBrowserService:
                             decision = self.policy.evaluate(
                                 action.proposal,
                                 observation.url,
+                                query_origins,
                             )
                     else:
                         decision = self.policy.evaluate(
                             action.proposal,
                             observation.url,
+                            query_origins,
                         )
                 action = self.store.prepare_action(
                     tenant_id,
@@ -464,6 +515,18 @@ class EffectBrowserService:
                 task = self.store.get_task(tenant_id, task_id)
                 if action.state is ActionState.APPROVAL_REQUIRED:
                     action = self._auto_approve(task, action)
+                    if (
+                        action.state is ActionState.PREPARED
+                        and action.proposal.kind is ActionKind.SUBMIT
+                    ):
+                        return RunResult(
+                            task=self.store.get_task(tenant_id, task_id),
+                            next_action=action,
+                            message=(
+                                "exact submit review was authorized; resume in a "
+                                "fresh browser session for crash-safe dispatch"
+                            ),
+                        )
                 if action.state is ActionState.APPROVAL_REQUIRED:
                     return RunResult(
                         task=task,
@@ -521,7 +584,7 @@ class EffectBrowserService:
                                 "as proof"
                             ),
                         )
-                    if not self.policy.allows_url(spec.url):
+                    if not self.policy.allows_url(spec.url, query_origins):
                         unknown = self.store.mark_outcome_unknown(
                             tenant_id,
                             action.id,
@@ -656,7 +719,11 @@ class EffectBrowserService:
         spec = action.proposal.reconciliation
         if spec is None:
             return None
-        if not self.policy.allows_url(spec.url):
+        task = self.store.get_task(tenant_id, action.task_id)
+        query_origins = (
+            (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+        )
+        if not self.policy.allows_url(spec.url, query_origins):
             raise ValueError("reconciliation URL origin is not allowed")
         receipt = driver.reconcile(spec)
         if receipt is not None:
@@ -719,11 +786,17 @@ class EffectBrowserService:
     @staticmethod
     def _execute(proposal, driver: BrowserDriver) -> BrowserReceipt:
         if proposal.kind is ActionKind.FINISH:
+            observation = driver.observe()
             now = utc_now()
             return BrowserReceipt(
                 external_id="local-finish",
-                url="about:blank",
-                evidence_sha256=digest({"finished_at": now.isoformat()}),
+                url=observation.url,
+                evidence_sha256=digest(
+                    {
+                        "url": observation.url,
+                        "state_sha256": observation.state_sha256,
+                    }
+                ),
                 captured_at=now,
             )
         return driver.execute(proposal)
