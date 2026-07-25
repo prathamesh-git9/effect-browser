@@ -32,6 +32,7 @@ from effect_browser.domain import (
 from effect_browser.engine import EffectBrowserService
 from effect_browser.hard_target import create_hard_target_router
 from effect_browser.job_target import create_demo_job_router
+from effect_browser.mission import MissionCoordinator
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import (
     DeterministicPlanner,
@@ -140,6 +141,16 @@ def get_autopilot() -> AutopilotCoordinator:
     return AutopilotCoordinator(service=get_service(), settings=get_settings())
 
 
+def get_mission_coordinator() -> MissionCoordinator:
+    settings = get_settings()
+    return MissionCoordinator(
+        store=get_store(),
+        autopilot=get_autopilot(),
+        settings=settings,
+        max_parallel_research=settings.mission_max_parallel_research,
+    )
+
+
 class CreateTaskBody(BaseModel):
     instruction: str = Field(min_length=1, max_length=4_000)
     start_url: str = "http://127.0.0.1:8000"
@@ -203,8 +214,10 @@ class AutopilotBody(BaseModel):
 
 app = FastAPI(
     title="Effect Browser",
-    version="0.3.0",
-    description="One-query browser automation with honest effect semantics.",
+    version="0.4.0",
+    description=(
+        "Durable multi-search and browser missions with honest effect semantics."
+    ),
     lifespan=lifespan,
 )
 
@@ -315,6 +328,46 @@ def run_autopilot(
     return coordinator.execute(tenant_id=who.tenant_id, query=body.query)
 
 
+@app.post("/v1/missions")
+def run_mission(
+    body: AutopilotBody,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+):
+    """Decompose, persist, execute, and truthfully assess one bounded mission."""
+    return coordinator.execute(tenant_id=who.tenant_id, query=body.query)
+
+
+@app.get("/v1/missions")
+def list_missions(
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.list_missions(who.tenant_id)
+
+
+@app.get("/v1/missions/{mission_id}")
+def mission_detail(
+    mission_id: UUID,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+) -> dict[str, Any]:
+    result = coordinator.inspect(tenant_id=who.tenant_id, mission_id=mission_id)
+    return {
+        "result": result,
+        "events": coordinator.store.mission_events(who.tenant_id, mission_id),
+    }
+
+
+@app.post("/v1/missions/{mission_id}/run")
+def resume_mission(
+    mission_id: UUID,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+):
+    return coordinator.run(tenant_id=who.tenant_id, mission_id=mission_id)
+
+
 @app.get("/v1/tasks")
 def list_tasks(
     who: Annotated[Identity, Depends(identity)],
@@ -387,6 +440,10 @@ def task_detail(
     actions = service.store.list_actions(who.tenant_id, task_id)
     return {
         "task": task,
+        "parent_mission_id": service.store.mission_for_child_task(
+            who.tenant_id,
+            task_id,
+        ),
         "actions": [
             {
                 **action.model_dump(mode="json"),
@@ -418,6 +475,10 @@ def run_task(
     service: Annotated[EffectBrowserService, Depends(get_service)],
 ):
     task = service.store.get_task(who.tenant_id, task_id)
+    if mission_id := service.store.mission_for_child_task(who.tenant_id, task_id):
+        raise ConflictError(
+            f"task is owned by mission {mission_id}; resume the parent mission"
+        )
     extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
     browser = driver(extra_origins)
     try:

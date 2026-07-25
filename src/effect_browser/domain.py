@@ -39,6 +39,40 @@ class TaskStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class MissionStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class MissionStepKind(StrEnum):
+    RESEARCH = "research"
+    BROWSER = "browser"
+    SYNTHESIS = "synthesis"
+
+
+class MissionStepStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class MissionVerdict(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    VERIFIED_EFFECT = "verified_effect"
+    NEEDS_INPUT = "needs_input"
+    NEEDS_AUTHORITY = "needs_authority"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class AutonomyMode(StrEnum):
     SUPERVISED = "supervised"
     BOUNDED = "bounded"
@@ -585,6 +619,92 @@ class Task(DomainModel):
     version: int
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
+
+
+class MissionPlanStep(DomainModel):
+    key: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    kind: MissionStepKind
+    instruction: str = Field(min_length=1, max_length=2_000)
+    depends_on: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_dependencies(self) -> MissionPlanStep:
+        if self.key in self.depends_on:
+            raise ValueError("mission step cannot depend on itself")
+        if len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("mission step dependencies must be unique")
+        return self
+
+
+class MissionPlan(DomainModel):
+    summary: str = Field(min_length=1, max_length=500)
+    steps: tuple[MissionPlanStep, ...] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_dag(self) -> MissionPlan:
+        keys = [step.key for step in self.steps]
+        if len(set(keys)) != len(keys):
+            raise ValueError("mission step keys must be unique")
+        known: set[str] = set()
+        for step in self.steps:
+            missing = set(step.depends_on) - known
+            if missing:
+                raise ValueError(
+                    "mission steps must be topologically ordered; missing "
+                    f"dependencies for {step.key}: {', '.join(sorted(missing))}"
+                )
+            known.add(step.key)
+        return self
+
+
+class Mission(DomainModel):
+    id: UUID
+    tenant_id: UUID
+    query: str
+    provider: str
+    plan_summary: str
+    external_commit_authorized: bool
+    max_external_commits: int = Field(ge=0, le=1)
+    status: MissionStatus
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+class MissionStep(DomainModel):
+    id: UUID
+    mission_id: UUID
+    tenant_id: UUID
+    ordinal: int = Field(ge=0, le=7)
+    key: str
+    kind: MissionStepKind
+    instruction: str
+    depends_on: tuple[str, ...] = ()
+    status: MissionStepStatus
+    child_task_id: UUID | None = None
+    output: dict[str, Any] | None = None
+    output_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_output_hash(self) -> MissionStep:
+        if self.output is None and self.output_sha256 is not None:
+            raise ValueError("mission step output hash requires output")
+        if self.output is not None and digest(self.output) != self.output_sha256:
+            raise ValueError("mission step output does not match its SHA-256")
+        return self
 
 
 class FactualProfile(DomainModel):

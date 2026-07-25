@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from effect_browser import api
 from effect_browser.config import get_settings
+from effect_browser.domain import (
+    ActionKind,
+    MissionPlan,
+    MissionPlanStep,
+    MissionStepKind,
+    ProposedAction,
+)
 
 
 def client_for(tmp_path: Path, monkeypatch) -> TestClient:
@@ -157,6 +165,103 @@ def test_autopilot_api_accepts_only_a_natural_language_query(
     assert response.status_code == 200
     assert response.json()["query"].startswith("Inspect the status")
     assert response.json()["verdict"] == "verified_success"
+
+
+def test_mission_api_accepts_one_query_and_returns_the_persisted_dag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class StubCoordinator:
+        def execute(self, *, tenant_id, query):
+            return {
+                "mission": {
+                    "id": "40000000-0000-0000-0000-000000000004",
+                    "tenant_id": str(tenant_id),
+                    "query": query,
+                    "status": "succeeded",
+                },
+                "steps": [
+                    {
+                        "key": "source_one",
+                        "kind": "research",
+                        "status": "succeeded",
+                    },
+                    {
+                        "key": "source_two",
+                        "kind": "research",
+                        "status": "succeeded",
+                    },
+                ],
+                "verdict": "completed",
+            }
+
+    api.app.dependency_overrides[api.get_mission_coordinator] = lambda: StubCoordinator()
+    try:
+        with client_for(tmp_path, monkeypatch) as client:
+            response = client.post(
+                "/v1/missions",
+                json={"query": "Research two official sources and compare them."},
+            )
+    finally:
+        api.app.dependency_overrides.pop(api.get_mission_coordinator, None)
+
+    assert response.status_code == 200
+    assert response.json()["verdict"] == "completed"
+    assert [step["kind"] for step in response.json()["steps"]] == [
+        "research",
+        "research",
+    ]
+
+
+def test_mission_owned_child_cannot_run_through_generic_task_endpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with client_for(tmp_path, monkeypatch) as client:
+        store = api.get_store()
+        mission = store.create_mission(
+            mission_id=uuid4(),
+            tenant_id=get_settings().default_tenant_id,
+            query="Inspect the target.",
+            provider="test",
+            plan=MissionPlan(
+                summary="One owned child.",
+                steps=(
+                    MissionPlanStep(
+                        key="browser",
+                        kind=MissionStepKind.BROWSER,
+                        instruction="Inspect the target.",
+                    ),
+                ),
+            ),
+            external_commit_authorized=False,
+        )
+        step = store.list_mission_steps(
+            get_settings().default_tenant_id,
+            mission.id,
+        )[0]
+        assert step.child_task_id is not None
+        store.create_task(
+            task_id=step.child_task_id,
+            tenant_id=get_settings().default_tenant_id,
+            instruction="Synthetic child.",
+            start_url="https://example.com/",
+            provider="test",
+            actions=(
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    description="Synthetic finish.",
+                ),
+            ),
+        )
+
+        detail = client.get(f"/v1/tasks/{step.child_task_id}")
+        run = client.post(f"/v1/tasks/{step.child_task_id}/run")
+
+    assert detail.status_code == 200
+    assert detail.json()["parent_mission_id"] == str(mission.id)
+    assert run.status_code == 409
+    assert "resume the parent mission" in run.text
 
 
 def test_cross_tenant_task_is_hidden(tmp_path: Path, monkeypatch) -> None:

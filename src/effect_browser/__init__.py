@@ -1,3 +1,3 @@
-"""One-query browser operations with honest external-effect semantics."""
+"""Durable multi-search missions with honest browser-effect semantics."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

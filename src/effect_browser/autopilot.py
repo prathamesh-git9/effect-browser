@@ -254,7 +254,14 @@ class AutopilotCoordinator:
         self.driver_factory = driver_factory or self._driver
         self.resolver_factory = resolver_factory or GroundedTargetResolver
 
-    def execute(self, *, tenant_id: UUID, query: str) -> AutopilotResult:
+    def execute(
+        self,
+        *,
+        tenant_id: UUID,
+        query: str,
+        task_id: UUID | None = None,
+        commit_authorized: bool | None = None,
+    ) -> AutopilotResult:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query cannot be blank")
@@ -299,6 +306,8 @@ class AutopilotCoordinator:
             else None
         )
         commits = query_authorizes_commit(normalized_query)
+        if commit_authorized is False:
+            commits = False
         autonomy = AutonomyScope(
             mode=AutonomyMode.BOUNDED,
             allow_query_target_origin=True,
@@ -311,6 +320,7 @@ class AutopilotCoordinator:
             instruction=instruction,
             start_url=start_url,
             planner=self.planner_factory(runtime),
+            task_id=task_id,
             profile_id=profile_id,
             document_path=document_path,
             document_sha256=document_sha256,
@@ -328,6 +338,25 @@ class AutopilotCoordinator:
             max_external_commits=1 if commits else 0,
         )
         return assess_result(self.service, run_result, resolution)
+
+    def resume(self, *, tenant_id: UUID, task_id: UUID) -> AutopilotResult:
+        """Resume a pre-existing child task without planning a duplicate task."""
+        task = self.service.store.get_task(tenant_id, task_id)
+        result = self._run_to_pause(tenant_id, task, task.start_url)
+        resolution = AutopilotResolution(
+            start_url=task.start_url,
+            target_source=(
+                TargetSource.USER_URL
+                if extract_url(task.instruction)
+                else TargetSource.GROUNDED_SEARCH
+            ),
+            provider=task.provider,
+            profile_id=task.profile_id,
+            document_sha256=task.document_sha256,
+            external_commit_authorized=task.autonomy.allow_external_commits,
+            max_external_commits=task.autonomy.max_external_commits,
+        )
+        return assess_result(self.service, result, resolution)
 
     def _run_to_pause(
         self,

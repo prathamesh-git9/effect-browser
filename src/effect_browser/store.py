@@ -40,6 +40,12 @@ from effect_browser.domain import (
     BrowserAction,
     BrowserReceipt,
     FactualProfile,
+    Mission,
+    MissionPlan,
+    MissionStatus,
+    MissionStep,
+    MissionStepKind,
+    MissionStepStatus,
     Observation,
     OutgoingReview,
     PolicyDecision,
@@ -78,6 +84,51 @@ class TaskRow(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     lease_owner: Mapped[str | None] = mapped_column(String(100), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MissionRow(Base):
+    __tablename__ = "missions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    query: Mapped[str] = mapped_column(Text)
+    provider: Mapped[str] = mapped_column(String(80))
+    plan_summary: Mapped[str] = mapped_column(Text)
+    external_commit_authorized: Mapped[int] = mapped_column(Integer, default=0)
+    max_external_commits: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    lease_owner: Mapped[str | None] = mapped_column(String(100), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MissionStepRow(Base):
+    __tablename__ = "mission_steps"
+    __table_args__ = (
+        UniqueConstraint("mission_id", "ordinal"),
+        UniqueConstraint("mission_id", "key"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("missions.id"), index=True
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer)
+    key: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(30))
+    instruction: Mapped[str] = mapped_column(Text)
+    depends_on: Mapped[list[str]] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    child_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class ActionRow(Base):
@@ -530,6 +581,496 @@ class DatabaseStore:
                 .order_by(AuditEventRow.sequence)
             ).all()
             return [self._event(row) for row in rows]
+
+    def create_mission(
+        self,
+        *,
+        mission_id: UUID,
+        tenant_id: UUID,
+        query: str,
+        provider: str,
+        plan: MissionPlan,
+        external_commit_authorized: bool,
+    ) -> Mission:
+        now = utc_now()
+        max_external_commits = 1 if external_commit_authorized else 0
+        with self.session() as session:
+            row = MissionRow(
+                id=str(mission_id),
+                tenant_id=str(tenant_id),
+                query=query,
+                provider=provider,
+                plan_summary=plan.summary,
+                external_commit_authorized=int(external_commit_authorized),
+                max_external_commits=max_external_commits,
+                status=MissionStatus.QUEUED.value,
+                created_at=now,
+                updated_at=now,
+                version=1,
+                lease_owner=None,
+                lease_expires_at=None,
+            )
+            session.add(row)
+            for ordinal, planned in enumerate(plan.steps):
+                step_id = uuid4()
+                session.add(
+                    MissionStepRow(
+                        id=str(step_id),
+                        mission_id=str(mission_id),
+                        tenant_id=str(tenant_id),
+                        ordinal=ordinal,
+                        key=planned.key,
+                        kind=planned.kind.value,
+                        instruction=planned.instruction,
+                        depends_on=list(planned.depends_on),
+                        status=MissionStepStatus.PENDING.value,
+                        child_task_id=(
+                            str(uuid4())
+                            if planned.kind is MissionStepKind.BROWSER
+                            else None
+                        ),
+                        output=None,
+                        output_sha256=None,
+                        error=None,
+                        created_at=now,
+                        updated_at=now,
+                        version=1,
+                    )
+                )
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=None,
+                kind="mission.created",
+                payload={
+                    "provider": provider,
+                    "step_count": len(plan.steps),
+                    "plan_sha256": digest(plan.model_dump(mode="json")),
+                    "query_sha256": digest({"query": query}),
+                    "external_commit_authorized": external_commit_authorized,
+                    "max_external_commits": max_external_commits,
+                },
+            )
+            session.flush()
+            return self._mission(row)
+
+    def get_mission(self, tenant_id: UUID, mission_id: UUID) -> Mission:
+        with self.session() as session:
+            return self._mission(self._mission_row(session, tenant_id, mission_id))
+
+    def list_missions(self, tenant_id: UUID) -> list[Mission]:
+        with self.session() as session:
+            rows = session.scalars(
+                select(MissionRow)
+                .where(MissionRow.tenant_id == str(tenant_id))
+                .order_by(MissionRow.created_at.desc())
+            ).all()
+            return [self._mission(row) for row in rows]
+
+    def list_mission_steps(
+        self,
+        tenant_id: UUID,
+        mission_id: UUID,
+    ) -> list[MissionStep]:
+        with self.session() as session:
+            self._mission_row(session, tenant_id, mission_id)
+            rows = session.scalars(
+                select(MissionStepRow)
+                .where(
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.mission_id == str(mission_id),
+                )
+                .order_by(MissionStepRow.ordinal)
+            ).all()
+            return [self._mission_step(row) for row in rows]
+
+    def mission_for_child_task(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+    ) -> UUID | None:
+        with self.session() as session:
+            mission_id = session.scalar(
+                select(MissionStepRow.mission_id).where(
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.child_task_id == str(task_id),
+                )
+            )
+            return UUID(mission_id) if mission_id else None
+
+    def mission_events(
+        self,
+        tenant_id: UUID,
+        mission_id: UUID,
+    ) -> list[AuditEvent]:
+        with self.session() as session:
+            self._mission_row(session, tenant_id, mission_id)
+            rows = session.scalars(
+                select(AuditEventRow)
+                .where(
+                    AuditEventRow.tenant_id == str(tenant_id),
+                    AuditEventRow.task_id == str(mission_id),
+                    AuditEventRow.kind.like("mission.%"),
+                )
+                .order_by(AuditEventRow.sequence)
+            ).all()
+            return [self._event(row) for row in rows]
+
+    def claim_mission(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        owner: str,
+        lease_seconds: int = 300,
+    ) -> Mission:
+        now = utc_now()
+        expires_at = now + timedelta(seconds=lease_seconds)
+        terminal = {
+            MissionStatus.SUCCEEDED.value,
+            MissionStatus.BLOCKED.value,
+            MissionStatus.FAILED.value,
+        }
+        with self.session() as session:
+            result = session.execute(
+                update(MissionRow)
+                .where(
+                    MissionRow.id == str(mission_id),
+                    MissionRow.tenant_id == str(tenant_id),
+                    MissionRow.status.not_in(terminal),
+                    or_(
+                        MissionRow.lease_owner.is_(None),
+                        MissionRow.lease_owner == owner,
+                        and_(
+                            MissionRow.lease_expires_at.is_not(None),
+                            MissionRow.lease_expires_at < now,
+                        ),
+                    ),
+                )
+                .values(
+                    status=MissionStatus.RUNNING.value,
+                    lease_owner=owner,
+                    lease_expires_at=expires_at,
+                    updated_at=now,
+                    version=MissionRow.version + 1,
+                )
+            )
+            if result.rowcount != 1:
+                exists = session.scalar(
+                    select(MissionRow.id).where(
+                        MissionRow.id == str(mission_id),
+                        MissionRow.tenant_id == str(tenant_id),
+                    )
+                )
+                if exists is None:
+                    raise NotFoundError("mission not found")
+                raise ConflictError("mission is terminal or leased by another worker")
+            stale = session.scalars(
+                select(MissionStepRow).where(
+                    MissionStepRow.mission_id == str(mission_id),
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.status == MissionStepStatus.RUNNING.value,
+                )
+            ).all()
+            for step in stale:
+                step.status = MissionStepStatus.PENDING.value
+                step.updated_at = now
+                step.version += 1
+            row = self._mission_row(session, tenant_id, mission_id)
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=None,
+                kind="mission.lease_acquired",
+                payload={
+                    "owner": owner,
+                    "expires_at": expires_at.isoformat(),
+                    "recovered_running_steps": len(stale),
+                },
+            )
+            return self._mission(row)
+
+    def renew_mission_lease(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        owner: str,
+        lease_seconds: int = 300,
+    ) -> None:
+        now = utc_now()
+        with self.session() as session:
+            result = session.execute(
+                update(MissionRow)
+                .where(
+                    MissionRow.id == str(mission_id),
+                    MissionRow.tenant_id == str(tenant_id),
+                    MissionRow.lease_owner == owner,
+                    MissionRow.lease_expires_at >= now,
+                )
+                .values(lease_expires_at=now + timedelta(seconds=lease_seconds))
+            )
+            if result.rowcount != 1:
+                raise ConflictError("mission worker lease was lost or expired")
+
+    def release_mission(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        owner: str,
+    ) -> None:
+        with self.session() as session:
+            row = self._mission_row(session, tenant_id, mission_id)
+            if row.lease_owner != owner:
+                return
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.updated_at = utc_now()
+            row.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=None,
+                kind="mission.lease_released",
+                payload={"owner": owner},
+            )
+
+    def start_mission_steps(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        step_ids: tuple[UUID, ...],
+    ) -> list[MissionStep]:
+        if not step_ids:
+            return []
+        now = utc_now()
+        with self.session() as session:
+            mission = self._mission_row(session, tenant_id, mission_id)
+            if MissionStatus(mission.status) is not MissionStatus.RUNNING:
+                raise ConflictError("mission must be running before a step can start")
+            rows = session.scalars(
+                select(MissionStepRow)
+                .where(
+                    MissionStepRow.mission_id == str(mission_id),
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.id.in_([str(item) for item in step_ids]),
+                )
+                .order_by(MissionStepRow.ordinal)
+            ).all()
+            if len(rows) != len(step_ids):
+                raise NotFoundError("mission step not found")
+            if any(
+                MissionStepStatus(row.status) is not MissionStepStatus.PENDING
+                for row in rows
+            ):
+                raise ConflictError("only pending mission steps can start")
+            for row in rows:
+                row.status = MissionStepStatus.RUNNING.value
+                row.updated_at = now
+                row.version += 1
+                self._append_event(
+                    session,
+                    tenant_id=tenant_id,
+                    task_id=mission_id,
+                    action_id=UUID(row.id),
+                    kind="mission.step_started",
+                    payload={"step_key": row.key, "kind": row.kind},
+                )
+            mission.updated_at = now
+            mission.version += 1
+            session.flush()
+            return [self._mission_step(row) for row in rows]
+
+    def complete_mission_step(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        step_id: UUID,
+        output: dict[str, Any],
+    ) -> MissionStep:
+        now = utc_now()
+        output_hash = digest(output)
+        with self.session() as session:
+            mission = self._mission_row(session, tenant_id, mission_id)
+            row = self._mission_step_row(session, tenant_id, mission_id, step_id)
+            if MissionStepStatus(row.status) is MissionStepStatus.SUCCEEDED:
+                if row.output_sha256 != output_hash:
+                    raise ConflictError("completed mission step output cannot change")
+                return self._mission_step(row)
+            if MissionStepStatus(row.status) is not MissionStepStatus.RUNNING:
+                raise ConflictError("only a running mission step can complete")
+            row.status = MissionStepStatus.SUCCEEDED.value
+            row.output = output
+            row.output_sha256 = output_hash
+            row.error = None
+            row.updated_at = now
+            row.version += 1
+            mission.updated_at = now
+            mission.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=step_id,
+                kind="mission.step_completed",
+                payload={
+                    "step_key": row.key,
+                    "kind": row.kind,
+                    "output_sha256": output_hash,
+                },
+            )
+            session.flush()
+            return self._mission_step(row)
+
+    def stop_mission_step(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        step_id: UUID,
+        status: MissionStepStatus,
+        error: str,
+        output: dict[str, Any] | None = None,
+    ) -> MissionStep:
+        if status not in {
+            MissionStepStatus.BLOCKED,
+            MissionStepStatus.FAILED,
+            MissionStepStatus.SKIPPED,
+        }:
+            raise ValueError("stopped mission step needs a terminal non-success status")
+        now = utc_now()
+        with self.session() as session:
+            mission = self._mission_row(session, tenant_id, mission_id)
+            row = self._mission_step_row(session, tenant_id, mission_id, step_id)
+            current = MissionStepStatus(row.status)
+            allowed = (
+                {MissionStepStatus.RUNNING, MissionStepStatus.PENDING}
+                if status is MissionStepStatus.SKIPPED
+                else {MissionStepStatus.RUNNING}
+            )
+            if current not in allowed:
+                raise ConflictError("mission step cannot transition from its state")
+            row.status = status.value
+            row.output = output
+            row.output_sha256 = digest(output) if output is not None else None
+            row.error = error[:2_000]
+            row.updated_at = now
+            row.version += 1
+            mission.updated_at = now
+            mission.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=step_id,
+                kind=f"mission.step_{status.value}",
+                payload={"step_key": row.key, "reason": error[:500]},
+            )
+            session.flush()
+            return self._mission_step(row)
+
+    def finish_mission(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        status: MissionStatus,
+        reason: str,
+    ) -> Mission:
+        if status not in {
+            MissionStatus.SUCCEEDED,
+            MissionStatus.BLOCKED,
+            MissionStatus.FAILED,
+        }:
+            raise ValueError("mission final status must be terminal")
+        now = utc_now()
+        with self.session() as session:
+            row = self._mission_row(session, tenant_id, mission_id)
+            if MissionStatus(row.status) in {
+                MissionStatus.SUCCEEDED,
+                MissionStatus.BLOCKED,
+                MissionStatus.FAILED,
+            }:
+                return self._mission(row)
+            row.status = status.value
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.updated_at = now
+            row.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=None,
+                kind=f"mission.{status.value}",
+                payload={"reason": reason[:500]},
+            )
+            session.flush()
+            return self._mission(row)
+
+    def reopen_mission_step(
+        self,
+        *,
+        tenant_id: UUID,
+        mission_id: UUID,
+        step_id: UUID,
+        reason: str,
+    ) -> MissionStep:
+        """Requeue one paused browser child after its underlying gate changes."""
+        now = utc_now()
+        with self.session() as session:
+            mission = self._mission_row(session, tenant_id, mission_id)
+            row = self._mission_step_row(session, tenant_id, mission_id, step_id)
+            state_pair = (
+                MissionStatus(mission.status),
+                MissionStepStatus(row.status),
+            )
+            if state_pair not in {
+                (MissionStatus.BLOCKED, MissionStepStatus.BLOCKED),
+                (MissionStatus.FAILED, MissionStepStatus.FAILED),
+            }:
+                raise ConflictError(
+                    "only a matching blocked or interrupted browser step can reopen"
+                )
+            row.status = MissionStepStatus.PENDING.value
+            row.error = None
+            row.updated_at = now
+            row.version += 1
+            skipped = session.scalars(
+                select(MissionStepRow).where(
+                    MissionStepRow.mission_id == str(mission_id),
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.status == MissionStepStatus.SKIPPED.value,
+                )
+            ).all()
+            for dependent in skipped:
+                dependent.status = MissionStepStatus.PENDING.value
+                dependent.error = None
+                dependent.updated_at = now
+                dependent.version += 1
+            mission.status = MissionStatus.QUEUED.value
+            mission.updated_at = now
+            mission.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=mission_id,
+                action_id=step_id,
+                kind="mission.step_reopened",
+                payload={
+                    "step_key": row.key,
+                    "reason": reason[:500],
+                    "requeued_skipped_steps": len(skipped),
+                },
+            )
+            session.flush()
+            return self._mission_step(row)
 
     def create_task(
         self,
@@ -1973,6 +2514,47 @@ class DatabaseStore:
         )
 
     @staticmethod
+    def _mission(row: MissionRow) -> Mission:
+        return Mission(
+            id=UUID(row.id),
+            tenant_id=UUID(row.tenant_id),
+            query=row.query,
+            provider=row.provider,
+            plan_summary=row.plan_summary,
+            external_commit_authorized=bool(row.external_commit_authorized),
+            max_external_commits=row.max_external_commits,
+            status=MissionStatus(row.status),
+            created_at=_as_utc(row.created_at),
+            updated_at=_as_utc(row.updated_at),
+            version=row.version,
+            lease_owner=row.lease_owner,
+            lease_expires_at=(
+                _as_utc(row.lease_expires_at) if row.lease_expires_at else None
+            ),
+        )
+
+    @staticmethod
+    def _mission_step(row: MissionStepRow) -> MissionStep:
+        return MissionStep(
+            id=UUID(row.id),
+            mission_id=UUID(row.mission_id),
+            tenant_id=UUID(row.tenant_id),
+            ordinal=row.ordinal,
+            key=row.key,
+            kind=MissionStepKind(row.kind),
+            instruction=row.instruction,
+            depends_on=tuple(row.depends_on or ()),
+            status=MissionStepStatus(row.status),
+            child_task_id=UUID(row.child_task_id) if row.child_task_id else None,
+            output=row.output,
+            output_sha256=row.output_sha256,
+            error=row.error,
+            created_at=_as_utc(row.created_at),
+            updated_at=_as_utc(row.updated_at),
+            version=row.version,
+        )
+
+    @staticmethod
     def _profile(row: FactualProfileRow) -> FactualProfile:
         return FactualProfile(
             id=UUID(row.id),
@@ -2088,6 +2670,40 @@ class DatabaseStore:
         )
         if row is None:
             raise NotFoundError("task not found")
+        return row
+
+    @staticmethod
+    def _mission_row(
+        session: Session,
+        tenant_id: UUID,
+        mission_id: UUID,
+    ) -> MissionRow:
+        row = session.scalar(
+            select(MissionRow).where(
+                MissionRow.id == str(mission_id),
+                MissionRow.tenant_id == str(tenant_id),
+            )
+        )
+        if row is None:
+            raise NotFoundError("mission not found")
+        return row
+
+    @staticmethod
+    def _mission_step_row(
+        session: Session,
+        tenant_id: UUID,
+        mission_id: UUID,
+        step_id: UUID,
+    ) -> MissionStepRow:
+        row = session.scalar(
+            select(MissionStepRow).where(
+                MissionStepRow.id == str(step_id),
+                MissionStepRow.mission_id == str(mission_id),
+                MissionStepRow.tenant_id == str(tenant_id),
+            )
+        )
+        if row is None:
+            raise NotFoundError("mission step not found")
         return row
 
     @staticmethod

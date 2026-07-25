@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     provider: str = "auto"
     openai_model: str = "gpt-5.6"
     grok_model: str = "grok-4.5"
+    mission_max_parallel_research: int = Field(default=4, ge=1, le=8)
     default_profile_id: UUID | None = None
     default_document_path: Path | None = None
     browser_executable: str | None = None

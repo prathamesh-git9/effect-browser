@@ -30,7 +30,13 @@ def test_worker_reports_one_task_failure_and_exits_cleanly(monkeypatch) -> None:
         start_url="https://example.com",
         autonomy=AutonomyScope(mode=AutonomyMode.SUPERVISED),
     )
-    service = SimpleNamespace(store=SimpleNamespace(list_tasks=lambda _tenant_id: [task]))
+    service = SimpleNamespace(
+        store=SimpleNamespace(
+            list_tasks=lambda _tenant_id: [task],
+            list_missions=lambda _tenant_id: [],
+            mission_for_child_task=lambda _tenant_id, _task_id: None,
+        )
+    )
     monkeypatch.setattr(cli, "_service", lambda: service)
     monkeypatch.setattr(
         cli,

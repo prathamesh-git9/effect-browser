@@ -26,6 +26,7 @@ outside the application. The durable observation stores only hashes and URLs.
 | `EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS` | Comma-separated local directories from which files may be attached; empty disables uploads. |
 | `EFFECT_BROWSER_ALLOWED_UPLOAD_ORIGINS` | Exact origins allowed to receive a hash-verified multipart file-change upload; empty blocks auto-upload writes. |
 | `EFFECT_BROWSER_PROVIDER` | `auto`, `openai-reactive`, or `grok-reactive` for one-query public-web tasks. |
+| `EFFECT_BROWSER_MISSION_MAX_PARALLEL_RESEARCH` | Maximum concurrent read-only mission searches; defaults to `4`, capped at `8`. |
 | `EFFECT_BROWSER_DEFAULT_PROFILE_ID` | Optional tenant profile selected by one-query mode. |
 | `EFFECT_BROWSER_DEFAULT_DOCUMENT_PATH` | Optional absolute default document; normal upload allowlist/hash rules still apply. |
 | `EFFECT_BROWSER_BROWSER_HEADLESS` | Headless execution; defaults to `true`. |
@@ -33,17 +34,34 @@ outside the application. The durable observation stores only hashes and URLs.
 | `EFFECT_BROWSER_ARTIFACTS_DIRECTORY` | Trace and screenshot destination. |
 | `OPENAI_API_KEY` / `XAI_API_KEY` | Needed only for the matching planner. |
 
-## One-query operation
+## One-query mission operation
 
-Run `effect-browser do "QUERY"` or `POST {"query":"..."}` to `/v1/autopilot`. An
-explicit URL is used directly after network-boundary validation. URL-free queries use
+Run `effect-browser do "QUERY"` or `POST {"query":"..."}` to `/v1/missions`. The
+provider returns a strict graph of at most eight persisted steps. Ready read-only
+research steps run concurrently; synthesis and browser steps respect their declared
+dependencies. Inspect with `GET /v1/missions/{mission_id}` and resume an interrupted
+non-terminal mission with `POST /v1/missions/{mission_id}/run`.
+
+The lower-level `/v1/autopilot` endpoint still runs one browser task. An explicit URL
+is used directly after network-boundary validation. URL-free browser tasks use
 provider-hosted web search and fail when no grounded target can be established.
+
+The durable CLI worker polls queued/running missions before individual tasks.
+Human-gated blocked missions require an explicit mission resume after the child gate
+has been resolved. Mission-owned child tasks are excluded from the generic task worker
+and direct task-run surfaces; resume the parent mission instead. A background
+heartbeat renews the mission lease while a long browser child is active.
 
 The query may pre-authorize at most one external commit. An abort-first submit review
 is persisted, then dispatch resumes in a fresh browser session so preview-mutated DOM
 state cannot weaken approval binding. The result is `verified_success` only when the
 receipt contract matches; visible page text alone is insufficient. See
 [AUTOPILOT.md](AUTOPILOT.md).
+
+A mission that authorizes a commit must contain exactly one browser step. Its child
+task ID is reserved before execution, so a worker restart resumes the durable child
+instead of planning a duplicate. Research and synthesis never receive commit
+authority. See [MISSIONS.md](MISSIONS.md).
 
 ## Factual profiles and task documents
 

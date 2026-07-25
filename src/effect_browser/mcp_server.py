@@ -8,6 +8,8 @@ from effect_browser.autopilot import AutopilotCoordinator
 from effect_browser.capabilities import capability_catalog
 from effect_browser.config import get_settings
 from effect_browser.domain import AutonomyScope
+from effect_browser.mission import MissionCoordinator
+from effect_browser.store import ConflictError
 
 
 def _absolute_document_path(document_path: str | None) -> Path | None:
@@ -29,16 +31,46 @@ def create_mcp_server():
 
     @server.tool()
     def do_browser_task(query: str) -> dict:
-        """Resolve, run, and prove one browser task from this query alone."""
+        """Decompose and run one cited multi-search/browser mission."""
         settings = get_settings()
-        result = AutopilotCoordinator(
-            service=get_service(),
+        service = get_service()
+        result = MissionCoordinator(
+            store=service.store,
+            autopilot=AutopilotCoordinator(service=service, settings=settings),
             settings=settings,
+            max_parallel_research=settings.mission_max_parallel_research,
         ).execute(
             tenant_id=settings.default_tenant_id,
             query=query,
         )
         return result.model_dump(mode="json")
+
+    @server.tool()
+    def get_browser_mission(mission_id: str) -> dict:
+        """Inspect durable mission steps and hash-chained mission audit events."""
+        settings = get_settings()
+        service = get_service()
+        coordinator = MissionCoordinator(
+            store=service.store,
+            autopilot=AutopilotCoordinator(service=service, settings=settings),
+            settings=settings,
+            max_parallel_research=settings.mission_max_parallel_research,
+        )
+        mission = UUID(mission_id)
+        result = coordinator.inspect(
+            tenant_id=settings.default_tenant_id,
+            mission_id=mission,
+        )
+        return {
+            "result": result.model_dump(mode="json"),
+            "events": [
+                event.model_dump(mode="json")
+                for event in service.store.mission_events(
+                    settings.default_tenant_id,
+                    mission,
+                )
+            ],
+        }
 
     @server.tool()
     def create_browser_task(
@@ -114,6 +146,10 @@ def create_mcp_server():
         service = get_service()
         tenant = UUID(tenant_id)
         task = service.store.get_task(tenant, UUID(task_id))
+        if mission_id := service.store.mission_for_child_task(tenant, task.id):
+            raise ConflictError(
+                f"task is owned by mission {mission_id}; run the parent mission"
+            )
         extra_origins = (
             (task.start_url,) if task.autonomy.allow_query_target_origin else ()
         )

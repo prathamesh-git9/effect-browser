@@ -89,6 +89,7 @@ class EffectBrowserService:
         instruction: str,
         start_url: str,
         planner: Planner,
+        task_id: UUID | None = None,
         profile_id: UUID | None = None,
         document_path: Path | None = None,
         document_sha256: str | None = None,
@@ -104,7 +105,7 @@ class EffectBrowserService:
                 document_path,
                 document_sha256,
             )
-        task_id = uuid4()
+        task_id = task_id or uuid4()
         request = PlanRequest(
             task_id=task_id,
             instruction=instruction,

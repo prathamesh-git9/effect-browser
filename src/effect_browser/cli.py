@@ -10,16 +10,22 @@ import typer
 import uvicorn
 from rich.console import Console
 
-from effect_browser.autopilot import AutopilotCoordinator, AutopilotVerdict
+from effect_browser.autopilot import AutopilotCoordinator
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.capabilities import capability_catalog
 from effect_browser.config import get_settings
-from effect_browser.domain import ActionState, AutonomyMode, AutonomyScope
+from effect_browser.domain import (
+    ActionState,
+    AutonomyMode,
+    AutonomyScope,
+    MissionVerdict,
+)
 from effect_browser.engine import (
     CrashAfterCommitDriver,
     EffectBrowserService,
     SimulatedProcessCrash,
 )
+from effect_browser.mission import MissionCoordinator
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import (
     DeterministicPlanner,
@@ -32,7 +38,10 @@ from effect_browser.providers import (
 from effect_browser.research import capture_research
 from effect_browser.store import DatabaseStore
 
-app = typer.Typer(no_args_is_help=True, help="One-query, crash-safe browser operations.")
+app = typer.Typer(
+    no_args_is_help=True,
+    help="Durable multi-search and crash-safe browser operations.",
+)
 console = Console()
 
 
@@ -151,18 +160,30 @@ def create_task(
 
 @app.command("do")
 def do_browser_task(query: str = typer.Argument(...)) -> None:
-    """Resolve and run one browser task from one natural-language query."""
+    """Decompose and run one multi-search/browser mission from one query."""
     settings = get_settings()
-    result = AutopilotCoordinator(
-        service=_service(),
+    service = _service()
+    result = MissionCoordinator(
+        store=service.store,
+        autopilot=AutopilotCoordinator(service=service, settings=settings),
         settings=settings,
+        max_parallel_research=settings.mission_max_parallel_research,
     ).execute(
         tenant_id=settings.default_tenant_id,
         query=query,
     )
     console.print_json(result.model_dump_json())
-    if result.verdict is not AutopilotVerdict.VERIFIED_SUCCESS:
+    if result.verdict not in {
+        MissionVerdict.COMPLETED,
+        MissionVerdict.VERIFIED_EFFECT,
+    }:
         raise typer.Exit(2)
+
+
+@app.command("mission")
+def run_mission(query: str = typer.Argument(...)) -> None:
+    """Alias for `do`; retained to make the durable mission boundary explicit."""
+    do_browser_task(query)
 
 
 @app.command("run")
@@ -171,6 +192,13 @@ def run_task(task_id: UUID) -> None:
     settings = get_settings()
     service = _service()
     task = service.store.get_task(settings.default_tenant_id, task_id)
+    if mission_id := service.store.mission_for_child_task(
+        settings.default_tenant_id,
+        task_id,
+    ):
+        raise typer.BadParameter(
+            f"task is owned by mission {mission_id}; run the parent mission"
+        )
     extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
     browser = _driver(extra_origins)
     try:
@@ -349,20 +377,49 @@ def worker(
     poll_seconds: float = typer.Option(2.0, min=0.1),
     once: bool = typer.Option(False, help="Run one polling cycle and exit."),
 ) -> None:
-    """Run queued work; bounded tasks consume their recorded pre-authorization."""
+    """Run queued missions and tasks; every recorded authority gate remains active."""
     settings = get_settings()
     service = _service()
+    missions = MissionCoordinator(
+        store=service.store,
+        autopilot=AutopilotCoordinator(service=service, settings=settings),
+        settings=settings,
+        max_parallel_research=settings.mission_max_parallel_research,
+    )
     console.print(
         "[green]Worker started; approval and recovery gates remain enforced.[/green]"
     )
     while True:
+        runnable_missions = [
+            mission
+            for mission in service.store.list_missions(settings.default_tenant_id)
+            if mission.status.value in {"queued", "running"}
+        ]
+        for mission in runnable_missions:
+            try:
+                result = missions.run(
+                    tenant_id=settings.default_tenant_id,
+                    mission_id=mission.id,
+                )
+                console.print(f"mission {mission.id}: {result.message}")
+            except Exception as exc:
+                console.print(
+                    f"[red]mission {mission.id}: {type(exc).__name__}: {exc}[/red]"
+                )
         runnable = [
             task
             for task in service.store.list_tasks(settings.default_tenant_id)
-            if task.status.value in {"queued", "running"}
-            or (
-                task.status.value == "awaiting_approval"
-                and task.autonomy.mode is AutonomyMode.BOUNDED
+            if service.store.mission_for_child_task(
+                settings.default_tenant_id,
+                task.id,
+            )
+            is None
+            and (
+                task.status.value in {"queued", "running"}
+                or (
+                    task.status.value == "awaiting_approval"
+                    and task.autonomy.mode is AutonomyMode.BOUNDED
+                )
             )
         ]
         for task in runnable:

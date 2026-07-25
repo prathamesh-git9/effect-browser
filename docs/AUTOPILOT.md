@@ -48,7 +48,10 @@ MCP:
 do_browser_task(query)
 ```
 
-The dashboard presents the same one-box path. The original URL, provider, profile,
+`/v1/autopilot` is the single-browser-task primitive. The dashboard, CLI `do`, and MCP
+`do_browser_task` now place the durable mission scheduler above it; a simple request
+still becomes one browser step, while a compound request can include parallel cited
+research. See [MISSIONS.md](MISSIONS.md). The original URL, provider, profile,
 document-hash, and authority controls remain under **Advanced task controls**.
 
 ## Resolution contract
@@ -66,7 +69,7 @@ document-hash, and authority controls remain under **Advanced task controls**.
    instruction. A resolver cannot silently expand the user's intent.
 
 The implementation follows the official provider-hosted web-search contracts:
-[OpenAI Responses web search](https://platform.openai.com/docs/quickstart/make-your-first-api-request)
+[OpenAI Responses web search](https://developers.openai.com/api/docs/guides/tools-web-search)
 and [xAI web search](https://docs.x.ai/developers/tools/web-search).
 
 ## Authority contract

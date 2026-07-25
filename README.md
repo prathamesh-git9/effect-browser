@@ -1,7 +1,7 @@
 # Effect Browser
 
-Effect Browser is a one-query, crash-safe control plane for AI-driven browser
-operations. It is
+Effect Browser is a one-query, crash-safe control plane for multi-search research and
+AI-driven browser operations. It is
 not another “click things with an LLM” wrapper. It focuses on the failure ordinary
 browser agents handle badly: the target may commit an external action just before the
 browser or worker crashes.
@@ -16,22 +16,37 @@ business reference or receipt.
 Read the [research decision](docs/RESEARCH.md) and [technical spec](docs/SPEC.md).
 Deployment and recovery procedures are in the [operations runbook](docs/OPERATIONS.md).
 The exact one-query capability and its hard limits are in
-[the autopilot contract](docs/AUTOPILOT.md).
+[the autopilot contract](docs/AUTOPILOT.md). Compound-query decomposition,
+parallel-search, and parent-authority semantics are in
+[the mission contract](docs/MISSIONS.md).
 
-## One-query mode
+## One-query mission mode
 
 Configure `OPENAI_API_KEY` or `XAI_API_KEY`, then give the normal path only a query:
 
 ```powershell
-effect-browser do "Check the status at https://status.example.com"
+effect-browser do "Research official pricing, reliability, and limits, then compare them."
 ```
 
-If the query has no URL, the selected provider must use hosted web search to ground a
-start page. If the query names an external effect such as `apply`, `book`, `order`, or
-`submit`, it pre-authorizes at most one reviewed commit. The command exits successfully
-only for `verified_success`; a model saying it finished is insufficient.
+The provider creates a strict graph of at most eight persisted research, synthesis,
+and browser steps. Independent research searches run concurrently and must return
+provider tool evidence plus source URLs. Completed outputs are hashed and retained
+across worker restarts.
 
-Read-only navigation ends as `unverified` unless the task produces a deterministic
+If the query names an external effect such as `apply`, `book`, `order`, or `submit`,
+the whole mission gets at most one committing browser child and one reviewed commit.
+Decomposition cannot multiply that authority. The command exits successfully only for
+`completed` or `verified_effect`; a model saying it finished is insufficient.
+
+Planner-authored browser-step text is not passed back as user authority and cannot
+inject a target URL. Mission-owned child tasks are executable only through their
+parent mission, whose lease is heartbeated during long browser work.
+
+The low-level `POST /v1/autopilot` surface still runs exactly one browser task. If that
+task has no URL, the selected provider must use hosted web search to ground a start
+page.
+
+Read-only browser navigation ends as `unverified` unless the task produces a deterministic
 goal-specific receipt. A final page hash is evidence for inspection, not proof that the
 model interpreted the user's goal correctly.
 
