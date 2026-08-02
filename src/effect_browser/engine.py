@@ -102,6 +102,7 @@ class EffectBrowserService:
         document_path: Path | None = None,
         document_sha256: str | None = None,
         autonomy: AutonomyScope | None = None,
+        authority_context: dict[str, object] | None = None,
     ) -> Task:
         if (document_path is None) != (document_sha256 is None):
             raise ValueError(
@@ -143,6 +144,7 @@ class EffectBrowserService:
             ),
             document_sha256=document_sha256,
             autonomy=autonomy,
+            authority_context=authority_context,
         )
 
     def run(

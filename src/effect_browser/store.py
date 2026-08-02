@@ -647,6 +647,9 @@ class DatabaseStore:
         provider: str,
         plan: MissionPlan,
         external_commit_authorized: bool,
+        external_commit_granted: bool | None = None,
+        commit_intent_detected: bool | None = None,
+        authority_reason: str | None = None,
     ) -> Mission:
         now = utc_now()
         max_external_commits = 1 if external_commit_authorized else 0
@@ -693,6 +696,17 @@ class DatabaseStore:
                         version=1,
                     )
                 )
+            authority_payload = (
+                {
+                    "authority_version": 2,
+                    "external_commit_granted": external_commit_granted,
+                    "commit_intent_detected": commit_intent_detected,
+                    "authority_reason": authority_reason,
+                }
+                if external_commit_granted is not None
+                and commit_intent_detected is not None
+                else {}
+            )
             self._append_event(
                 session,
                 tenant_id=tenant_id,
@@ -706,6 +720,7 @@ class DatabaseStore:
                     "query_sha256": digest({"query": query}),
                     "external_commit_authorized": external_commit_authorized,
                     "max_external_commits": max_external_commits,
+                    **authority_payload,
                 },
             )
             session.flush()
@@ -1234,6 +1249,7 @@ class DatabaseStore:
         document_path: Path | None = None,
         document_sha256: str | None = None,
         autonomy: AutonomyScope | None = None,
+        authority_context: dict[str, Any] | None = None,
     ) -> Task:
         now = utc_now()
         with self.session() as session:
@@ -1288,6 +1304,7 @@ class DatabaseStore:
                     "profile_id": str(profile_id) if profile_id else None,
                     "document_sha256": document_sha256,
                     "autonomy": (autonomy or AutonomyScope()).model_dump(mode="json"),
+                    "authority_context": authority_context,
                 },
             )
             session.flush()

@@ -320,7 +320,8 @@ def test_one_query_autopilot_proves_real_browser_completion(
                 "query": (
                     "Order three encrypted backup drives at "
                     f"{base_url} without a duplicate order."
-                )
+                ),
+                "allow_external_commit": True,
             },
             timeout=90,
         )
@@ -433,7 +434,8 @@ def test_multi_search_mission_gates_one_real_browser_commit(
                 "query": (
                     "Order three encrypted backup drives at "
                     f"{base_url} without a duplicate order."
-                )
+                ),
+                "allow_external_commit": True,
             },
             timeout=90,
         )

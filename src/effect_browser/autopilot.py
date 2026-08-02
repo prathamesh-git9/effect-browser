@@ -36,6 +36,7 @@ from effect_browser.providers.http import (
     _raise_provider_error,
     _strict_schema,
 )
+from effect_browser.store import ConflictError
 from effect_browser.uploads import sha256_file
 
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -68,6 +69,8 @@ NO_COMMIT_PATTERN = re.compile(
     r"\bwithout\s+"
     r"(apply|book|buy|cancel|delete|order|pay|post|publish|purchase|"
     r"register|reserve|schedule|send|sign|submit|submitting)\b|"
+    r"\b(apply|book|buy|cancel|delete|order|pay|post|publish|purchase|"
+    r"register|reserve|schedule|send|sign|submit)\s+(nothing|none)\b|"
     r"\b(draft|preview|review|research|prepare)\s+only\b",
     re.IGNORECASE,
 )
@@ -112,8 +115,22 @@ class AutopilotResolution(DomainModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    external_commit_granted: bool
+    commit_intent_detected: bool
     external_commit_authorized: bool
     max_external_commits: int
+
+
+class CommitAuthorityDecision(DomainModel):
+    """Deterministic two-key authorization result for one external commit."""
+
+    caller_granted: bool
+    commit_intent_detected: bool
+    denial_detected: bool
+    authorized: bool
+    matched_commit: str | None = None
+    matched_denial: str | None = None
+    reason: str
 
 
 class AutopilotEvidence(DomainModel):
@@ -260,11 +277,17 @@ class AutopilotCoordinator:
         tenant_id: UUID,
         query: str,
         task_id: UUID | None = None,
-        commit_authorized: bool | None = None,
+        allow_external_commit: bool = False,
     ) -> AutopilotResult:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query cannot be blank")
+        # Authority is resolved before target discovery or document/profile access so
+        # a contradictory grant cannot cause work outside the rejected request.
+        authority = decide_commit_authority(
+            normalized_query,
+            caller_granted=allow_external_commit,
+        )
 
         instruction, document_path = resolve_document(
             normalized_query,
@@ -305,9 +328,7 @@ class AutopilotCoordinator:
             if profile_requested
             else None
         )
-        commits = query_authorizes_commit(normalized_query)
-        if commit_authorized is False:
-            commits = False
+        commits = authority.authorized
         autonomy = AutonomyScope(
             mode=AutonomyMode.BOUNDED,
             allow_query_target_origin=True,
@@ -325,6 +346,7 @@ class AutopilotCoordinator:
             document_path=document_path,
             document_sha256=document_sha256,
             autonomy=autonomy,
+            authority_context=authority.model_dump(mode="json"),
         )
         run_result = self._run_to_pause(tenant_id, task, start_url)
         resolution = AutopilotResolution(
@@ -334,6 +356,8 @@ class AutopilotCoordinator:
             research_urls=target.research_urls,
             profile_id=profile_id,
             document_sha256=document_sha256,
+            external_commit_granted=authority.caller_granted,
+            commit_intent_detected=authority.commit_intent_detected,
             external_commit_authorized=commits,
             max_external_commits=1 if commits else 0,
         )
@@ -342,6 +366,7 @@ class AutopilotCoordinator:
     def resume(self, *, tenant_id: UUID, task_id: UUID) -> AutopilotResult:
         """Resume a pre-existing child task without planning a duplicate task."""
         task = self.service.store.get_task(tenant_id, task_id)
+        authority = _persisted_task_authority(self.service, task)
         result = self._run_to_pause(tenant_id, task, task.start_url)
         resolution = AutopilotResolution(
             start_url=task.start_url,
@@ -353,6 +378,8 @@ class AutopilotCoordinator:
             provider=task.provider,
             profile_id=task.profile_id,
             document_sha256=task.document_sha256,
+            external_commit_granted=authority.caller_granted,
+            commit_intent_detected=authority.commit_intent_detected,
             external_commit_authorized=task.autonomy.allow_external_commits,
             max_external_commits=task.autonomy.max_external_commits,
         )
@@ -548,12 +575,154 @@ def _document_from_query(query: str) -> str | None:
     return windows.group(0) if windows else None
 
 
-def query_authorizes_commit(query: str) -> bool:
+def decide_commit_authority(
+    query: str,
+    *,
+    caller_granted: bool,
+) -> CommitAuthorityDecision:
+    """Require both explicit caller authority and deterministic commit intent.
+
+    Language matching is deliberately incapable of granting authority by itself.
+    A contradictory explicit grant fails loudly instead of silently discarding the
+    caller's words.
+    """
+
     normalized = query.casefold().replace("don't", "do not").replace("dont", "do not")
     normalized = re.sub(r"[^\w\s]+", " ", normalized)
-    return (
-        NO_COMMIT_PATTERN.search(normalized) is None
-        and COMMIT_PATTERN.search(normalized) is not None
+    denial = NO_COMMIT_PATTERN.search(normalized)
+    commit = next(
+        (
+            match
+            for match in COMMIT_PATTERN.finditer(normalized)
+            if not _is_incidental_commit_usage(normalized, match)
+        ),
+        None,
+    )
+    if caller_granted and denial is not None:
+        raise ValueError(
+            "external commit grant contradicts the request's explicit read-only "
+            f"language ({denial.group(0)!r}); remove --commit or rewrite the request"
+        )
+    authorized = caller_granted and commit is not None and denial is None
+    if authorized:
+        reason = "explicit caller grant and commit intent permit at most one commit"
+    elif not caller_granted:
+        reason = "the caller did not explicitly grant an external commit"
+    else:
+        reason = "the request does not explicitly name a supported external action"
+    return CommitAuthorityDecision(
+        caller_granted=caller_granted,
+        commit_intent_detected=commit is not None,
+        denial_detected=denial is not None,
+        authorized=authorized,
+        matched_commit=commit.group(0) if commit is not None else None,
+        matched_denial=denial.group(0) if denial is not None else None,
+        reason=reason,
+    )
+
+
+def _is_incidental_commit_usage(normalized: str, match: re.Match[str]) -> bool:
+    """Reject common noun and answer-format uses of otherwise dangerous verbs.
+
+    This matcher intentionally prefers a false negative: an explicit caller grant is
+    only useful when the query also expresses an unambiguous external action.
+    """
+
+    verb = match.group(0).casefold()
+    before = normalized[: match.start()].rstrip()
+    after = normalized[match.end() :].lstrip()
+    if verb == "apply" and re.match(r"(?:the\s+)?filters?\b", after):
+        return True
+    if verb == "book" and re.match(r"about\b", after):
+        return True
+    if verb == "cancel" and re.match(r"culture\b", after):
+        return True
+    if verb == "delete" and re.match(r"(?:the\s+)?key\b|documentation\b", after):
+        return True
+    if verb == "order" and (
+        (re.search(r"\bin$", before) and re.match(r"to\b", after))
+        or re.search(r"\bpurchase$", before)
+    ):
+        return True
+    if verb == "post" and re.match(
+        r"(?:the\s+)?results?\s+in\s+(?:a\s+)?table\b",
+        after,
+    ):
+        return True
+    if (
+        verb == "purchase"
+        and re.search(
+            r"\b(?:compare|explain|inspect|research|review)$",
+            before,
+        )
+        and re.match(r"order\b", after)
+    ):
+        return True
+    if verb == "register" and re.match(r"(?:the\s+)?trend\b", after):
+        return True
+    if verb == "schedule" and re.search(
+        r"\b(?:check|compare|inspect|read|review)(?:\s+\w+){0,3}$",
+        before,
+    ):
+        return True
+    if verb == "send" and re.match(
+        r"(?:me\s+)?(?:(?:a|the)\s+)?(?:results?|summary)\b",
+        after,
+    ):
+        return True
+    return verb == "sign" and re.match(r"of\b", after) is not None
+
+
+def _persisted_task_authority(
+    service: EffectBrowserService,
+    task: Task,
+) -> CommitAuthorityDecision:
+    """Recover the original two-key decision without expanding legacy authority."""
+
+    created = next(
+        (
+            event
+            for event in service.store.events(task.tenant_id, task.id)
+            if event.kind == "task.created"
+        ),
+        None,
+    )
+    context = created.payload.get("authority_context") if created is not None else None
+    if context is not None:
+        persisted = None
+        recomputed = None
+        if isinstance(context, dict):
+            try:
+                persisted = CommitAuthorityDecision.model_validate(context)
+                recomputed = decide_commit_authority(
+                    task.instruction,
+                    caller_granted=persisted.caller_granted,
+                )
+            except ValueError:
+                persisted = None
+                recomputed = None
+        expected_max = 1 if persisted is not None and persisted.authorized else 0
+        if (
+            persisted is None
+            or recomputed is None
+            or persisted != recomputed
+            or persisted.authorized is not task.autonomy.allow_external_commits
+            or task.autonomy.max_external_commits != expected_max
+        ):
+            raise ConflictError(
+                "persisted task authority does not match its durable scope"
+            )
+        return persisted
+
+    # Older task events did not retain the two input keys. Preserve their effective
+    # scope, but never infer new authority while filling the reporting fields.
+    authorized = task.autonomy.allow_external_commits
+    return CommitAuthorityDecision(
+        caller_granted=authorized,
+        commit_intent_detected=authorized,
+        denial_detected=False,
+        authorized=authorized,
+        reason="legacy task scope retained without expanding external authority",
     )
 
 
@@ -590,6 +759,13 @@ def assess_result(
         is not None
     )
     proven_commit = any(item.kind is ActionKind.SUBMIT for item in evidence)
+    proven_rendered_finish = any(
+        action.state is ActionState.SUCCEEDED
+        and action.proposal.kind is ActionKind.FINISH
+        and bool((action.proposal.expected_outcome or "").strip())
+        and service.store.get_receipt(result.task.tenant_id, action.id) is not None
+        for action in actions
+    )
     status = result.task.status
 
     if status is TaskStatus.SUCCEEDED:
@@ -605,6 +781,12 @@ def assess_result(
                 "task completed with an authoritative external-effect receipt"
                 if proven_commit
                 else "task completed with a hash-verified download receipt"
+            )
+        elif proven_rendered_finish:
+            verdict = AutopilotVerdict.VERIFIED_SUCCESS
+            message = (
+                "task completed with receipt-backed rendered evidence for its "
+                "declared read-only outcome"
             )
         else:
             verdict = AutopilotVerdict.UNVERIFIED

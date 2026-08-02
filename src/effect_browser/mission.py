@@ -20,8 +20,8 @@ from effect_browser.autopilot import (
     _citation_urls,
     _remote_runtime,
     _used_web_search,
+    decide_commit_authority,
     extract_url,
-    query_authorizes_commit,
     select_provider,
 )
 from effect_browser.config import Settings
@@ -347,6 +347,22 @@ class _MissionLeaseHeartbeat:
                     owner=self.owner,
                 )
             except ConflictError as exc:
+                try:
+                    mission = self.store.get_mission(self.tenant_id, self.mission_id)
+                except Exception:
+                    # Once renewal is rejected, an unavailable state lookup cannot
+                    # prove the benign terminalization race. Preserve lease loss so
+                    # the worker cannot continue on an optimistic assumption.
+                    self._lost = exc
+                    return
+                if mission.status in {
+                    MissionStatus.SUCCEEDED,
+                    MissionStatus.BLOCKED,
+                    MissionStatus.FAILED,
+                }:
+                    # Terminalization atomically clears the lease. A final heartbeat
+                    # racing just after that commit is normal shutdown, not lease loss.
+                    return
                 self._lost = exc
                 return
             except Exception:
@@ -383,11 +399,21 @@ class MissionCoordinator:
         self.max_parallel_research = max_parallel_research
         self.lease_heartbeat_seconds = lease_heartbeat_seconds
 
-    def execute(self, *, tenant_id: UUID, query: str) -> MissionResult:
+    def execute(
+        self,
+        *,
+        tenant_id: UUID,
+        query: str,
+        allow_external_commit: bool = False,
+    ) -> MissionResult:
         normalized = query.strip()
         if not normalized:
             raise ValueError("query cannot be blank")
-        commits = query_authorizes_commit(normalized)
+        authority = decide_commit_authority(
+            normalized,
+            caller_granted=allow_external_commit,
+        )
+        commits = authority.authorized
         explicit_url = extract_url(normalized)
         if self.plan_provider is None:
             runtime = select_provider(self.settings, explicit_url, normalized)
@@ -411,6 +437,9 @@ class MissionCoordinator:
             provider=planner.name,
             plan=plan,
             external_commit_authorized=commits,
+            external_commit_granted=authority.caller_granted,
+            commit_intent_detected=authority.commit_intent_detected,
+            authority_reason=authority.reason,
         )
         return self.run(tenant_id=tenant_id, mission_id=mission.id, runtime=runtime)
 
@@ -811,7 +840,7 @@ class MissionCoordinator:
                 # user-supplied by the single-task target resolver.
                 query=mission.query,
                 task_id=step.child_task_id,
-                commit_authorized=mission.external_commit_authorized,
+                allow_external_commit=mission.external_commit_authorized,
             )
         else:
             result = self.autopilot.resume(
@@ -920,6 +949,33 @@ def _verify_persisted_mission(store: DatabaseStore, mission: Mission) -> None:
         None,
     )
     expected = created.payload if created is not None else {}
+    authority_version = expected.get("authority_version")
+    authority_valid = authority_version is None
+    if authority_version == 2:
+        granted = expected.get("external_commit_granted")
+        intent = expected.get("commit_intent_detected")
+        reason = expected.get("authority_reason")
+        recomputed = None
+        if isinstance(granted, bool):
+            try:
+                recomputed = decide_commit_authority(
+                    mission.query,
+                    caller_granted=granted,
+                )
+            except ValueError:
+                # A persisted grant that now contradicts the committed query is an
+                # integrity failure. Expose only the store-level conflict boundary.
+                recomputed = None
+        authority_valid = (
+            isinstance(granted, bool)
+            and isinstance(intent, bool)
+            and isinstance(reason, str)
+            and recomputed is not None
+            and intent is recomputed.commit_intent_detected
+            and reason == recomputed.reason
+            and mission.external_commit_authorized is recomputed.authorized
+            and not (recomputed.denial_detected and mission.external_commit_authorized)
+        )
     valid = (
         expected.get("plan_sha256") == digest(reconstructed.model_dump(mode="json"))
         and expected.get("query_sha256") == digest({"query": mission.query})
@@ -927,6 +983,7 @@ def _verify_persisted_mission(store: DatabaseStore, mission: Mission) -> None:
         and expected.get("external_commit_authorized")
         is mission.external_commit_authorized
         and expected.get("max_external_commits") == mission.max_external_commits
+        and authority_valid
     )
     if not valid:
         raise ConflictError(

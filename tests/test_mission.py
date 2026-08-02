@@ -11,7 +11,11 @@ import httpx
 import pytest
 from sqlalchemy import text
 
-from effect_browser.autopilot import AutopilotVerdict, ProviderRuntime
+from effect_browser.autopilot import (
+    AutopilotVerdict,
+    ProviderRuntime,
+    decide_commit_authority,
+)
 from effect_browser.config import Settings
 from effect_browser.domain import (
     ActionKind,
@@ -30,6 +34,7 @@ from effect_browser.mission import (
     ResponsesResearcher,
     ResponsesSynthesizer,
     SynthesisEvidence,
+    _MissionLeaseHeartbeat,
 )
 from effect_browser.providers.base import ProviderError
 from effect_browser.store import ConflictError
@@ -113,7 +118,7 @@ class UnverifiedBrowser:
 
     def execute(self, **kwargs):
         self.calls += 1
-        self.commit_authorized = kwargs["commit_authorized"]
+        self.commit_authorized = kwargs["allow_external_commit"]
         return ResultEnvelope(
             {
                 "verdict": AutopilotVerdict.UNVERIFIED.value,
@@ -263,6 +268,69 @@ def test_mission_runs_independent_searches_concurrently_and_persists_citations(
     }
 
 
+def test_heartbeat_records_lease_loss_when_terminal_state_lookup_fails() -> None:
+    attempted = threading.Event()
+
+    class UnavailableLeaseStore:
+        def renew_mission_lease(self, **_kwargs) -> None:
+            attempted.set()
+            raise ConflictError("mission lease was lost")
+
+        def get_mission(self, *_args) -> None:
+            raise RuntimeError("database unavailable")
+
+    heartbeat = _MissionLeaseHeartbeat(
+        store=UnavailableLeaseStore(),
+        tenant_id=TENANT,
+        mission_id=uuid4(),
+        owner="worker",
+        interval_seconds=0.01,
+    )
+
+    with pytest.raises(ConflictError, match="mission lease was lost"):
+        with heartbeat:
+            assert attempted.wait(timeout=1)
+
+
+def test_incidental_commit_word_stays_read_only_with_explicit_grant(store) -> None:
+    plan = MissionPlan(
+        summary="Compare one researched source.",
+        steps=(
+            MissionPlanStep(
+                key="pricing",
+                kind=MissionStepKind.RESEARCH,
+                instruction="official pricing",
+            ),
+        ),
+    )
+    coordinator = MissionCoordinator(
+        store=store,
+        autopilot=NoBrowser(),
+        settings=Settings(),
+        plan_provider=StaticPlanner(plan),
+        researcher=ConcurrentResearcher(),
+    )
+
+    result = coordinator.execute(
+        tenant_id=TENANT,
+        query="Research official pricing in order to compare vendors.",
+        allow_external_commit=True,
+    )
+
+    created = next(
+        event
+        for event in store.mission_events(TENANT, result.mission.id)
+        if event.kind == "mission.created"
+    )
+    assert result.verdict is MissionVerdict.COMPLETED
+    assert result.mission.external_commit_authorized is False
+    assert result.mission.max_external_commits == 0
+    assert created.payload["authority_version"] == 2
+    assert created.payload["external_commit_granted"] is True
+    assert created.payload["commit_intent_detected"] is False
+    assert store.list_tasks(TENANT) == []
+
+
 def test_resume_retries_only_interrupted_read_step_and_keeps_completed_output(
     store,
 ) -> None:
@@ -388,6 +456,7 @@ def test_decomposition_cannot_remove_or_multiply_parent_commit_authority(
         coordinator.execute(
             tenant_id=TENANT,
             query="Submit the requested operation.",
+            allow_external_commit=True,
         )
 
     assert store.list_missions(TENANT) == []
@@ -479,7 +548,11 @@ def test_planner_browser_instruction_cannot_inject_the_child_target(
         plan_provider=StaticPlanner(plan),
     )
 
-    result = coordinator.execute(tenant_id=TENANT, query=parent_query)
+    result = coordinator.execute(
+        tenant_id=TENANT,
+        query=parent_query,
+        allow_external_commit=True,
+    )
 
     assert result.verdict is MissionVerdict.VERIFIED_EFFECT
     assert browser.query == parent_query
@@ -509,6 +582,7 @@ def test_paused_browser_mission_can_resume_after_underlying_gate_changes(
     first = coordinator.execute(
         tenant_id=TENANT,
         query="Submit the operation at https://example.com.",
+        allow_external_commit=True,
     )
     child_task_id = first.steps[0].child_task_id
     assert child_task_id is not None
@@ -692,6 +766,124 @@ def test_persisted_plan_tampering_is_rejected_before_resume(store) -> None:
             text(
                 "UPDATE mission_steps SET instruction='Tampered instruction' "
                 "WHERE mission_id=:mission_id"
+            ),
+            {"mission_id": str(mission.id)},
+        )
+    coordinator = MissionCoordinator(
+        store=store,
+        autopilot=NoBrowser(),
+        settings=Settings(),
+        plan_provider=StaticPlanner(plan),
+        researcher=ConcurrentResearcher(),
+    )
+
+    with pytest.raises(ConflictError, match="does not match its audit commitment"):
+        coordinator.run(tenant_id=TENANT, mission_id=mission.id)
+
+
+def test_persisted_authority_reason_tampering_is_rejected_before_resume(store) -> None:
+    plan = MissionPlan(
+        summary="One research step.",
+        steps=(
+            MissionPlanStep(
+                key="research",
+                kind=MissionStepKind.RESEARCH,
+                instruction="Research one source.",
+            ),
+        ),
+    )
+    query = "Research one source."
+    authority = decide_commit_authority(query, caller_granted=False)
+    mission = store.create_mission(
+        mission_id=uuid4(),
+        tenant_id=TENANT,
+        query=query,
+        provider="test",
+        plan=plan,
+        external_commit_authorized=False,
+        external_commit_granted=authority.caller_granted,
+        commit_intent_detected=authority.commit_intent_detected,
+        authority_reason=authority.reason,
+    )
+    created = next(
+        event
+        for event in store.mission_events(TENANT, mission.id)
+        if event.kind == "mission.created"
+    )
+    payload = dict(created.payload)
+    payload["authority_reason"] = "tampered authority reason"
+    with store.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE audit_events SET payload=:payload "
+                "WHERE task_id=:mission_id AND kind='mission.created'"
+            ),
+            {"payload": json.dumps(payload), "mission_id": str(mission.id)},
+        )
+    coordinator = MissionCoordinator(
+        store=store,
+        autopilot=NoBrowser(),
+        settings=Settings(),
+        plan_provider=StaticPlanner(plan),
+        researcher=ConcurrentResearcher(),
+    )
+
+    with pytest.raises(ConflictError, match="does not match its audit commitment"):
+        coordinator.run(tenant_id=TENANT, mission_id=mission.id)
+
+
+def test_contradictory_persisted_grant_is_reported_as_integrity_conflict(store) -> None:
+    plan = MissionPlan(
+        summary="One research step.",
+        steps=(
+            MissionPlanStep(
+                key="research",
+                kind=MissionStepKind.RESEARCH,
+                instruction="Research one source.",
+            ),
+        ),
+    )
+    query = "Prepare only; do not submit."
+    authority = decide_commit_authority(query, caller_granted=False)
+    mission = store.create_mission(
+        mission_id=uuid4(),
+        tenant_id=TENANT,
+        query=query,
+        provider="test",
+        plan=plan,
+        external_commit_authorized=False,
+        external_commit_granted=authority.caller_granted,
+        commit_intent_detected=authority.commit_intent_detected,
+        authority_reason=authority.reason,
+    )
+    created = next(
+        event
+        for event in store.mission_events(TENANT, mission.id)
+        if event.kind == "mission.created"
+    )
+    payload = dict(created.payload)
+    payload.update(
+        {
+            "external_commit_granted": True,
+            "external_commit_authorized": True,
+            "max_external_commits": 1,
+            "authority_reason": (
+                "explicit caller grant and commit intent permit at most one commit"
+            ),
+        }
+    )
+    with store.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE audit_events SET payload=:payload "
+                "WHERE task_id=:mission_id AND kind='mission.created'"
+            ),
+            {"payload": json.dumps(payload), "mission_id": str(mission.id)},
+        )
+        connection.execute(
+            text(
+                "UPDATE missions SET external_commit_authorized=1, "
+                "max_external_commits=1 WHERE id=:mission_id"
             ),
             {"mission_id": str(mission.id)},
         )
