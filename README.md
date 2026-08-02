@@ -33,10 +33,18 @@ and browser steps. Independent research searches run concurrently and must retur
 provider tool evidence plus source URLs. Completed outputs are hashed and retained
 across worker restarts.
 
-If the query names an external effect such as `apply`, `book`, `order`, or `submit`,
-the whole mission gets at most one committing browser child and one reviewed commit.
-Decomposition cannot multiply that authority. The command exits successfully only for
-`completed` or `verified_effect`; a model saying it finished is insufficient.
+External effects require two independent keys: the query must name an effect such as
+`apply`, `book`, `order`, or `submit`, and the caller must explicitly pass `--commit`
+(or `allow_external_commit: true` over HTTP/MCP). Language alone can never grant write
+authority. The whole mission then gets at most one committing browser child and one
+reviewed commit. Decomposition cannot multiply that authority.
+
+```powershell
+effect-browser do "Order three drives at https://shop.example.test" --commit
+```
+
+The command exits successfully only for `completed` or `verified_effect`; a model
+saying it finished is insufficient.
 
 Planner-authored browser-step text is not passed back as user authority and cannot
 inject a target URL. Mission-owned child tasks are executable only through their
@@ -46,9 +54,12 @@ The low-level `POST /v1/autopilot` surface still runs exactly one browser task. 
 task has no URL, the selected provider must use hosted web search to ground a start
 page.
 
-Read-only browser navigation ends as `unverified` unless the task produces a deterministic
-goal-specific receipt. A final page hash is evidence for inspection, not proof that the
-model interpreted the user's goal correctly.
+Read-only browser navigation ends as `unverified` unless it produces deterministic,
+goal-specific rendered evidence. A `finish` expectation must be an exact phrase from the
+original user instruction and must appear in the final rendered snapshot. The receipt keeps
+only the URL, state hash, and expected-phrase hash; arbitrary page text is not persisted. A
+final page hash by itself is evidence for inspection, not proof that the model interpreted the
+user's goal correctly.
 
 This is not a promise to complete every website. CAPTCHA/MFA, credentials, payments,
 missing verified facts, unsupported multi-write flows, and unprovable outcomes return

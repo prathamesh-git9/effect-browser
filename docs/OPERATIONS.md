@@ -36,11 +36,18 @@ outside the application. The durable observation stores only hashes and URLs.
 
 ## One-query mission operation
 
-Run `effect-browser do "QUERY"` or `POST {"query":"..."}` to `/v1/missions`. The
-provider returns a strict graph of at most eight persisted steps. Ready read-only
-research steps run concurrently; synthesis and browser steps respect their declared
-dependencies. Inspect with `GET /v1/missions/{mission_id}` and resume an interrupted
-non-terminal mission with `POST /v1/missions/{mission_id}/run`.
+Run `effect-browser do "QUERY"` or `POST {"query":"..."}` to `/v1/missions`. Add
+`--commit` or `"allow_external_commit":true` only when the request should be allowed to
+perform at most one reviewed external write. The provider returns a strict graph of at
+most eight persisted steps. Ready read-only research steps run concurrently; synthesis
+and browser steps respect their declared dependencies. Inspect with
+`GET /v1/missions/{mission_id}` and resume an interrupted non-terminal mission with
+`POST /v1/missions/{mission_id}/run`.
+
+For an operator-readable, deterministic reconstruction, run
+`effect-browser replay-mission MISSION_ID`. It merges the parent and child audit events by
+their tenant-global sequence, preserves legitimate sequence gaps, and emits canonical JSON.
+The command exits with status `2` if the complete tenant audit chain does not verify.
 
 The lower-level `/v1/autopilot` endpoint still runs one browser task. An explicit URL
 is used directly after network-boundary validation. URL-free browser tasks use
@@ -52,11 +59,12 @@ has been resolved. Mission-owned child tasks are excluded from the generic task 
 and direct task-run surfaces; resume the parent mission instead. A background
 heartbeat renews the mission lease while a long browser child is active.
 
-The query may pre-authorize at most one external commit. An abort-first submit review
-is persisted, then dispatch resumes in a fresh browser session so preview-mutated DOM
-state cannot weaken approval binding. The result is `verified_success` only when the
-receipt contract matches; visible page text alone is insufficient. See
-[AUTOPILOT.md](AUTOPILOT.md).
+The query cannot authorize a write by itself. The caller's explicit grant and a
+supported commit verb jointly pre-authorize at most one external commit. An abort-first
+submit review is persisted, then dispatch resumes in a fresh browser session so
+preview-mutated DOM state cannot weaken approval binding. The result is
+`verified_success` only when the receipt contract matches; visible page text alone is
+insufficient. See [AUTOPILOT.md](AUTOPILOT.md).
 
 A mission that authorizes a commit must contain exactly one browser step. Its child
 task ID is reserved before execution, so a worker restart resumes the durable child
@@ -86,9 +94,21 @@ container, seccomp/AppArmor, dropped capabilities, and isolated egress.
 
 - `GET /healthz` proves the process is responsive.
 - `GET /readyz` verifies schema access.
-- `GET /metrics` exposes Prometheus request counters.
+- `GET /metrics` exposes Prometheus request counters plus bounded-label mission and browser
+  execution metrics:
+  - `effect_browser_mission_step_transitions_total`
+  - `effect_browser_mission_step_duration_seconds`
+  - `effect_browser_browser_action_transitions_total`
+  - `effect_browser_browser_action_duration_seconds`
+  - `effect_browser_external_commit_dispatch_attempts_total`
+  - `effect_browser_outcome_unknown_transitions_total`
 - Every response includes `X-Request-ID`; caller-supplied IDs are propagated.
 - `GET /v1/audit/verify` recomputes the tenant event chain and checks its durable head.
+
+Metric labels contain only bounded step kind, action kind, status, and risk enums. They never
+contain tenant/task IDs, URLs, providers, reasons, secrets, or page text. Metrics are emitted
+only after the database commit succeeds; metrics-delivery failure cannot roll back a committed
+domain transition. The audit ledger remains the authoritative history.
 
 Alert on repeated `409` conflicts, failed audit verification, tasks in
 `awaiting_recovery` or `awaiting_input`, and leases that expire while an action is
@@ -112,6 +132,12 @@ deployments.
 5. If no evidence exists, investigate the target independently. Only an operator may
    mark the effect `not_committed`; that resets the action and requires a new approval.
 6. Never mark `not_committed` merely because the success page was lost.
+
+The process-death harness deliberately calls `os._exit` after the target accepts a commit but
+before Effect Browser can persist its receipt. A replacement worker is fenced by the live
+lease, then converts the stale `dispatching` action to `outcome_unknown` after expiry. Receipt
+reconciliation may safely close that state; a target without reconciliation remains in manual
+recovery, and repeated worker runs do not dispatch again.
 
 ## Bounded unattended tasks
 

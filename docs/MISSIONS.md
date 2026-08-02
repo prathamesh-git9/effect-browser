@@ -17,7 +17,8 @@ the mission path.
 
 1. The selected provider returns a strict `MissionPlan`. Step keys are unique and each
    dependency must point backward, so cycles and forward references are rejected
-   before persistence.
+   before persistence. The validator also computes every ready wave and rejects a wave
+   wider than four, including a narrow root that fans out later.
 2. The plan, original query, authority budget, reserved browser child IDs, and every
    step state are written to the database before step execution.
 3. Ready research steps run concurrently, bounded by
@@ -41,6 +42,11 @@ has a reserved child task UUID. If the process disappears after child creation, 
 loads that task instead of planning a second one; the existing task's effect-key,
 dispatch, reconciliation, and receipt rules remain authoritative.
 
+The four-step ready-wave limit is a plan-integrity boundary, not only a worker-pool
+setting. It keeps provider-authored fan-out bounded even when an operator configures a
+larger runtime pool. The existing one-browser-step rule independently prevents synthesis
+text or a second branch from smuggling in another committing child.
+
 Mission-owned child tasks cannot run through the generic task API, CLI command, MCP
 tool, or polling worker. Approvals and verified facts may update the child, but browser
 execution resumes through the parent mission. This prevents a failed parent from
@@ -48,13 +54,17 @@ leaving an independently runnable pre-authorized task behind.
 
 ## Authority is not multiplied
 
-The original query owns the total external-effect budget. A planner cannot grant
-authority by writing stronger child instructions.
+The caller's explicit grant and the original query jointly own the total
+external-effect budget. A planner cannot grant authority by writing stronger child
+instructions.
 
-- A query without an explicit commit verb gives every browser child zero commit
-  authority.
-- A query with an explicit commit verb permits exactly one browser child and at most
-  one reviewed external commit.
+- Without `--commit` or `allow_external_commit: true`, every browser child has zero
+  commit authority even if the query contains `apply`, `book`, `order`, or `submit`.
+- A caller grant without a supported commit verb also gives zero authority.
+- A caller grant plus a supported commit verb permits exactly one browser child and
+  at most one reviewed external commit.
+- A caller grant that contradicts `do not submit`, `prepare only`, or equivalent
+  read-only language is rejected instead of silently weakening the user's words.
 - Research and synthesis are always read-only.
 - Browser effects still require the existing abort-first request preview, page-state
   binding, transmission guard, and authoritative receipt.
@@ -73,6 +83,7 @@ CLI:
 ```powershell
 effect-browser do "Research official pricing, reliability, and limits, then compare them."
 effect-browser mission "Research two options, then download the chosen public report."
+effect-browser do "Submit the form at https://example.test/form" --commit
 ```
 
 HTTP:
@@ -83,6 +94,9 @@ Content-Type: application/json
 
 {"query":"Research official pricing, reliability, and limits, then compare them."}
 ```
+
+Committing HTTP requests must add `"allow_external_commit": true`. MCP callers pass the
+same optional boolean to `do_browser_task`.
 
 Inspection and resume:
 
@@ -142,3 +156,5 @@ multi-write flows.
   duplicates.
 - `test_dashboard_renders_multi_search_dag_and_cited_result` submits through the real
   dashboard in Chromium and inspects the rendered DAG and source links.
+- `test_mission_graph_validation.py` rejects cycles, over-wide roots and later fan-out,
+  two browser children, and a synthesis attempt to create a second committing branch.

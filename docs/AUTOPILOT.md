@@ -5,11 +5,12 @@
 Effect Browser now has a real one-query execution path. It does **not** and cannot
 promise that every query will complete on every website without intervention.
 
-The normal input is one natural-language string. The system resolves or validates the
-target, chooses an available reactive provider, selects the configured or sole factual
-profile, binds an approved document when present, infers a maximum of one external
-commit from explicit verbs, creates a durable task, runs it, and derives its verdict
-from stored actions and receipts.
+The normal input is one natural-language string plus an optional explicit commit
+grant. The system resolves or validates the target, chooses an available reactive
+provider, selects the configured or sole factual profile, binds an approved document
+when present, creates a durable task, runs it, and derives its verdict from stored
+actions and receipts. A maximum of one external commit exists only when the caller
+grant and deterministic commit intent are both present.
 
 The following remain hard stops:
 
@@ -30,7 +31,7 @@ commit that exposes no queryable evidence.
 CLI:
 
 ```powershell
-effect-browser do "Apply at https://example.test/jobs/123 using \"C:\approved\cv.pdf\""
+effect-browser do "Apply at https://example.test/jobs/123 using \"C:\approved\cv.pdf\"" --commit
 ```
 
 HTTP:
@@ -39,13 +40,13 @@ HTTP:
 POST /v1/autopilot
 Content-Type: application/json
 
-{"query":"Check the service status at https://status.example.test"}
+{"query":"Apply at https://example.test/jobs/123","allow_external_commit":true}
 ```
 
 MCP:
 
 ```text
-do_browser_task(query)
+do_browser_task(query, allow_external_commit=true)
 ```
 
 `/v1/autopilot` is the single-browser-task primitive. The dashboard, CLI `do`, and MCP
@@ -74,11 +75,16 @@ and [xAI web search](https://docs.x.ai/developers/tools/web-search).
 
 ## Authority contract
 
-The query is an authority envelope, not a universal permission bypass.
+The query is an intent envelope, not authority by itself. External commits use a
+deterministic two-key rule.
 
-- Explicit commit verbs such as `apply`, `book`, `order`, `send`, or `submit` grant at
-  most one reviewed external commit.
-- Negation such as `do not submit` or `prepare only` grants no commit.
+- The caller must explicitly set `--commit` or `allow_external_commit: true`.
+- The query must also name a supported commit action such as `apply`, `book`, `order`,
+  `send`, or `submit`.
+- Language matching may deny or narrow authority; it can never create authority
+  without the independent caller grant.
+- Negation such as `do not submit` or `prepare only` contradicts an explicit grant and
+  fails before planning.
 - An explicit supported document path, or `EFFECT_BROWSER_DEFAULT_DOCUMENT_PATH`,
   grants selection of only that hash-verified file. The path is replaced with
   `[approved local document]` before any provider prompt.
@@ -106,10 +112,13 @@ allowlist into a wildcard.
 | `unverified` | The planner stopped, but no goal-specific receipt proves the requested external effect or read-only outcome. |
 | `failed` | The durable task failed before it could prove completion. |
 
-Visible thank-you text is not evidence. A model choosing `finish` cannot produce
-`verified_success` by itself. Effect queries require a succeeded `submit` plus
-authoritative receipt; read-only final state is evidence-captured but remains
-`unverified` unless a deterministic goal-specific contract exists.
+Visible thank-you text is not effect evidence. A model choosing `finish` cannot prove a
+requested write. Effect queries require a succeeded `submit` plus an authoritative receipt.
+For a read-only task, `finish` may prove the narrower requested observation only when its
+expected phrase is copied exactly from the original user instruction and appears in the final
+rendered snapshot. The durable receipt binds the URL, page-state hash, and expected-phrase
+hash without storing the rendered page text. A generic or model-invented expectation remains
+`unverified` or fails closed.
 
 ## Crash-safe session rollover
 
@@ -143,3 +152,8 @@ target, submits one natural-language query, drives real Chromium, crosses the sa
 session rollover, verifies one authoritative order, and asserts zero duplicate
 attempts. `test_model_finish_cannot_fake_a_requested_commit` proves that a planner
 cannot convert a bare `finish` into claimed success.
+
+`test_public_mission_e2e.py` drives the genuine mission, autopilot, engine, and
+Playwright path against `https://example.com/`, then verifies the persisted navigation,
+rendered-evidence receipt, and audit chain. `test_process_crash_e2e.py` hard-kills a spawned
+worker with `os._exit` after dispatch and proves restart fencing never performs a blind retry.
