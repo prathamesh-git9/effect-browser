@@ -77,10 +77,18 @@ class EffectBrowserService:
         store: DatabaseStore,
         policy: ActionPolicy,
         step_planners: dict[str, StepPlanner] | None = None,
+        *,
+        task_lease_seconds: int = 120,
     ) -> None:
+        if task_lease_seconds < 1:
+            raise ValueError("task_lease_seconds must be positive")
         self.store = store
         self.policy = policy
         self.step_planners = step_planners or {}
+        # A dead worker cannot run its release finally block. Keeping the lease
+        # duration injectable lets recovery wait for the same durable fencing rule
+        # in production and in process-death tests without unsafe lease stealing.
+        self.task_lease_seconds = task_lease_seconds
 
     def create_task(
         self,
@@ -116,6 +124,12 @@ class EffectBrowserService:
             raise ValueError("planner returned an empty action list")
         if len(actions) > 30:
             raise ValueError("planner returned more than 30 actions")
+        for action in actions:
+            _validate_finish_expectation(
+                action.kind,
+                action.expected_outcome,
+                instruction,
+            )
         return self.store.create_task(
             task_id=task_id,
             tenant_id=tenant_id,
@@ -151,6 +165,7 @@ class EffectBrowserService:
             tenant_id=tenant_id,
             task_id=task_id,
             owner=worker_id,
+            lease_seconds=self.task_lease_seconds,
         )
         try:
             return self._run_claimed(
@@ -276,6 +291,7 @@ class EffectBrowserService:
                 tenant_id=tenant_id,
                 task_id=task_id,
                 owner=worker_id,
+                lease_seconds=self.task_lease_seconds,
             )
             task = self.store.get_task(tenant_id, task_id)
             query_origins = (
@@ -365,6 +381,27 @@ class EffectBrowserService:
                                     "the planning provider failed; success is not claimed"
                                 ),
                             )
+                    try:
+                        _validate_finish_expectation(
+                            choice.kind,
+                            choice.expected_outcome,
+                            task.instruction,
+                        )
+                    except ValueError as exc:
+                        blocked = self.store.block_task(
+                            tenant_id,
+                            task_id,
+                            kind="provider_error",
+                            reason=str(exc),
+                            evidence=task.provider,
+                        )
+                        return RunResult(
+                            task=blocked,
+                            message=(
+                                "the planning provider proposed unbound finish "
+                                "evidence; success is not claimed"
+                            ),
+                        )
                     action = self.store.append_action(
                         tenant_id=tenant_id,
                         task_id=task_id,
@@ -787,6 +824,31 @@ class EffectBrowserService:
     @staticmethod
     def _execute(proposal, driver: BrowserDriver) -> BrowserReceipt:
         if proposal.kind is ActionKind.FINISH:
+            expected_phrase = (proposal.expected_outcome or "").strip()
+            if expected_phrase:
+                # Rendered text is useful only at this verification boundary. The
+                # durable receipt binds its hash and the page-state hash without
+                # copying target-controlled content into the store or audit log.
+                snapshot = driver.snapshot()
+                searchable = f"{snapshot.title}\n{snapshot.text_excerpt}".casefold()
+                if expected_phrase.casefold() not in searchable:
+                    raise ValueError(
+                        "rendered page did not contain the expected finish outcome"
+                    )
+                return BrowserReceipt(
+                    external_id="local-finish",
+                    url=snapshot.url,
+                    evidence_sha256=digest(
+                        {
+                            "url": snapshot.url,
+                            "state_sha256": snapshot.state_sha256,
+                            "expected_phrase_sha256": digest(
+                                {"expected_phrase": expected_phrase}
+                            ),
+                        }
+                    ),
+                    captured_at=utc_now(),
+                )
             observation = driver.observe()
             now = utc_now()
             return BrowserReceipt(
@@ -801,3 +863,20 @@ class EffectBrowserService:
                 captured_at=now,
             )
         return driver.execute(proposal)
+
+
+def _validate_finish_expectation(
+    kind: ActionKind,
+    expected_outcome: str | None,
+    instruction: str,
+) -> None:
+    """Keep durable finish evidence sourced from user intent, never page content."""
+    phrase = (expected_outcome or "").strip()
+    if (
+        kind is ActionKind.FINISH
+        and phrase
+        and phrase.casefold() not in instruction.casefold()
+    ):
+        raise ValueError(
+            "finish expected_outcome must be an exact phrase from the user instruction"
+        )

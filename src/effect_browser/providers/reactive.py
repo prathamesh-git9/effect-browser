@@ -56,6 +56,9 @@ def bind_choice(
             description=choice.description,
             scroll_y=choice.scroll_y,
             wait_ms=choice.wait_ms,
+            expected_outcome=(
+                choice.expected_outcome if choice.kind is ActionKind.FINISH else None
+            ),
             planned_from_sha256=snapshot.state_sha256,
         )
     candidates = {

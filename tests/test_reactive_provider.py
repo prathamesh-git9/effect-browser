@@ -84,6 +84,23 @@ def test_step_choice_cannot_invent_candidate(tmp_path: Path) -> None:
         )
 
 
+def test_read_only_finish_retains_goal_specific_rendered_evidence(
+    tmp_path: Path,
+) -> None:
+    proposal = bind_choice(
+        StepChoice(
+            kind=ActionKind.FINISH,
+            description="Finish only after observing the requested page evidence.",
+            expected_outcome="Submit application",
+        ),
+        page_snapshot(tmp_path),
+        effect_reference="EB-12345678",
+    )
+
+    assert proposal.expected_outcome == "Submit application"
+    assert proposal.planned_from_sha256 == "fresh-state"
+
+
 def test_upload_choice_binds_path_and_hash_without_exposing_path_in_snapshot(
     tmp_path: Path,
 ) -> None:

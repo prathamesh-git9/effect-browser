@@ -71,6 +71,37 @@ def test_provider_schema_closes_every_object() -> None:
         assert set(schema["required"]) == set(schema.get("properties", {}))
 
 
+def test_provider_schema_emits_only_supported_strict_string_formats() -> None:
+    supported = {
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    }
+    formats: list[str] = []
+
+    def collect(value) -> None:
+        if isinstance(value, dict):
+            if isinstance(value.get("format"), str):
+                formats.append(value["format"])
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(PLAN_SCHEMA)
+    collect(STEP_SCHEMA)
+
+    assert set(formats) <= supported
+    assert "path" not in formats
+
+
 def test_provider_schema_references_resolve_at_root() -> None:
     references: list[str] = []
 

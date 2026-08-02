@@ -16,6 +16,20 @@ from effect_browser.domain import (
 )
 from effect_browser.providers.base import ProviderError
 
+_SUPPORTED_STRICT_STRING_FORMATS = frozenset(
+    {
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    }
+)
+
 
 def _strict_schema(value: Any) -> Any:
     """Make Pydantic JSON Schema acceptable to strict Responses providers."""
@@ -24,6 +38,13 @@ def _strict_schema(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     result = {key: _strict_schema(item) for key, item in value.items()}
+    if (
+        isinstance(result.get("format"), str)
+        and result["format"] not in _SUPPORTED_STRICT_STRING_FORMATS
+    ):
+        # Pydantic annotates pathlib.Path as format=path, which strict Responses
+        # rejects. The local Pydantic model still validates the returned string.
+        result.pop("format")
     if result.get("type") == "object" or "properties" in result:
         properties = result.get("properties", {})
         result["additionalProperties"] = False
@@ -170,15 +191,18 @@ class ReactiveResponsesPlanner:
                                 "option from an open combobox. Never choose upload: "
                                 "remote providers have no authority to name local files; "
                                 "report a blocker when required. Use submit only for "
-                                "a commit candidate and finish only when the user's "
-                                "goal is "
-                                "visibly complete. "
+                                "a commit candidate. For a read-only finish, set "
+                                "expected_outcome only to a short exact phrase already "
+                                "present in the user's task and currently visible in "
+                                "the rendered snapshot. Never copy other page text "
+                                "into durable action fields. "
                                 "Do not invent personal, legal, demographic, employment, "
                                 "authorization, sponsorship, salary, or identity "
                                 "facts. If "
                                 "a required fact is absent, choose handoff and state the "
                                 "blocker instead of guessing. Use finish only when the "
-                                "requested outcome is visibly and verifiably complete."
+                                "requested outcome is visibly and verifiably complete; "
+                                "otherwise choose handoff."
                             ),
                         },
                         {
