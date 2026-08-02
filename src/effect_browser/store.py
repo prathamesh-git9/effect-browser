@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -58,6 +60,40 @@ from effect_browser.domain import (
     canonical_json,
     digest,
     utc_now,
+)
+from effect_browser.observability import (
+    CommittedAuditTransition,
+    OperationalMetrics,
+    operational_metrics,
+)
+
+STORE_LOG = logging.getLogger("effect_browser.store")
+_PENDING_METRICS_KEY = "effect_browser_committed_audit_transitions"
+_AUDIT_HASH = re.compile(r"^[0-9a-f]{64}$")
+_AUDIT_STEP_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_AUDIT_EVENT_KIND = re.compile(r"^(?:mission|task|action|approval)\.[a-z_]+$")
+_AUDIT_BOOLEAN_FIELDS = frozenset(
+    {
+        "automatic_progress",
+        "automatic_retry",
+        "commit_intent_detected",
+        "effect_key_released",
+        "external_commit_authorized",
+        "external_commit_granted",
+        "requires_new_approval",
+    }
+)
+_AUDIT_INTEGER_FIELDS = frozenset(
+    {
+        "action_count",
+        "authority_version",
+        "max_external_commits",
+        "ordinal",
+        "outgoing_request_count",
+        "recovered_running_steps",
+        "requeued_skipped_steps",
+        "step_count",
+    }
 )
 
 
@@ -294,12 +330,18 @@ class ConflictError(StoreError):
 
 
 class DatabaseStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        metrics: OperationalMetrics | None = operational_metrics,
+    ) -> None:
         connect_args = (
             {"check_same_thread": False} if database_url.startswith("sqlite") else {}
         )
         self.engine = create_engine(database_url, connect_args=connect_args)
         self._session = sessionmaker(self.engine, expire_on_commit=False)
+        self.metrics = metrics
 
     def initialize(self) -> None:
         Base.metadata.create_all(self.engine)
@@ -400,9 +442,11 @@ class DatabaseStore:
     @contextmanager
     def session(self) -> Iterator[Session]:
         session = self._session()
+        committed_transitions: tuple[CommittedAuditTransition, ...] = ()
         try:
             yield session
             session.commit()
+            committed_transitions = tuple(session.info.pop(_PENDING_METRICS_KEY, ()))
         except IntegrityError as exc:
             session.rollback()
             raise ConflictError("database uniqueness conflict") from exc
@@ -411,6 +455,18 @@ class DatabaseStore:
             raise
         finally:
             session.close()
+        if self.metrics is None:
+            return
+        for event in committed_transitions:
+            try:
+                self.metrics.observe_committed(event)
+            except Exception:
+                # The database is already committed. Telemetry must never turn a
+                # successful state transition into an apparent domain failure.
+                STORE_LOG.exception(
+                    "operational metric observation failed for %s",
+                    event.kind,
+                )
 
     def reset(self) -> None:
         Base.metadata.drop_all(self.engine)
@@ -717,6 +773,94 @@ class DatabaseStore:
             ).all()
             return [self._event(row) for row in rows]
 
+    def mission_timeline(
+        self,
+        tenant_id: UUID,
+        mission_id: UUID,
+    ) -> dict[str, Any]:
+        """Return a stable, content-redacted parent/child audit projection.
+
+        Audit sequence numbers are tenant-global. Selecting both the mission ID and
+        its reserved child IDs in one query preserves their true interleaving while
+        allowing legitimate gaps caused by unrelated work in the same tenant.
+        """
+        with self.session() as session:
+            mission_row = self._mission_row(session, tenant_id, mission_id)
+            step_rows = session.scalars(
+                select(MissionStepRow)
+                .where(
+                    MissionStepRow.tenant_id == str(tenant_id),
+                    MissionStepRow.mission_id == str(mission_id),
+                )
+                .order_by(MissionStepRow.ordinal)
+            ).all()
+            child_ids = tuple(
+                row.child_task_id for row in step_rows if row.child_task_id is not None
+            )
+            scoped_ids = (str(mission_id), *child_ids)
+            event_rows = session.scalars(
+                select(AuditEventRow)
+                .where(
+                    AuditEventRow.tenant_id == str(tenant_id),
+                    AuditEventRow.task_id.in_(scoped_ids),
+                )
+                .order_by(AuditEventRow.sequence)
+            ).all()
+            mission = {
+                "id": mission_row.id,
+                "status": MissionStatus(mission_row.status).value,
+                "external_commit_authorized": bool(
+                    mission_row.external_commit_authorized
+                ),
+                "max_external_commits": mission_row.max_external_commits,
+                "version": mission_row.version,
+            }
+            steps = [
+                {
+                    "id": row.id,
+                    "ordinal": row.ordinal,
+                    "key": _redacted_step_key(row.key),
+                    "kind": MissionStepKind(row.kind).value,
+                    "status": MissionStepStatus(row.status).value,
+                    "depends_on": [
+                        _redacted_step_key(key) for key in row.depends_on or ()
+                    ],
+                    "child_task_id": row.child_task_id,
+                    "output_sha256": _redacted_hash(row.output_sha256),
+                    "version": row.version,
+                }
+                for row in step_rows
+            ]
+            events = [
+                {
+                    "sequence": row.sequence,
+                    "scope": (
+                        "mission" if row.task_id == str(mission_id) else "browser_child"
+                    ),
+                    "action_id": row.action_id,
+                    "kind": _redacted_event_kind(row.kind),
+                    "payload": _redacted_audit_payload(row.payload),
+                    "occurred_at": _as_utc(row.occurred_at).isoformat(),
+                    "previous_hash": _redacted_hash(row.previous_hash),
+                    "event_hash": _redacted_hash(row.event_hash),
+                }
+                for row in event_rows
+            ]
+        verification = self.verify_audit(tenant_id)
+        return {
+            "schema_version": 1,
+            "tenant_id": str(tenant_id),
+            "mission": mission,
+            "steps": steps,
+            "events": events,
+            "audit": {
+                "valid": verification.valid,
+                "event_count": verification.event_count,
+                "head_hash": _redacted_hash(verification.head_hash),
+                "first_invalid_sequence": verification.first_invalid_sequence,
+            },
+        }
+
     def claim_mission(
         self,
         *,
@@ -970,7 +1114,11 @@ class DatabaseStore:
                 task_id=mission_id,
                 action_id=step_id,
                 kind=f"mission.step_{status.value}",
-                payload={"step_key": row.key, "reason": error[:500]},
+                payload={
+                    "step_key": row.key,
+                    "kind": row.kind,
+                    "reason": error[:500],
+                },
             )
             session.flush()
             return self._mission_step(row)
@@ -1065,6 +1213,7 @@ class DatabaseStore:
                 kind="mission.step_reopened",
                 payload={
                     "step_key": row.key,
+                    "kind": row.kind,
                     "reason": reason[:500],
                     "requeued_skipped_steps": len(skipped),
                 },
@@ -1737,6 +1886,8 @@ class DatabaseStore:
                 kind="action.dispatching",
                 payload={
                     "action_sha256": row.action_sha256,
+                    "action_kind": proposal.kind.value,
+                    "risk": row.risk,
                     "effect_key": proposal.effect_key,
                     "payload_sha256": (
                         proposal.outgoing_review.payload_sha256
@@ -1777,6 +1928,7 @@ class DatabaseStore:
                         captured_at=receipt.captured_at,
                     )
                 )
+            metric_labels = _action_metric_labels(row)
             row.state = ActionState.SUCCEEDED.value
             row.failure = None
             row.version += 1
@@ -1802,6 +1954,7 @@ class DatabaseStore:
                 action_id=action_id,
                 kind="action.succeeded",
                 payload={
+                    **metric_labels,
                     "external_id": receipt.external_id,
                     "evidence_sha256": receipt.evidence_sha256,
                     "url": receipt.url,
@@ -1820,6 +1973,7 @@ class DatabaseStore:
             row = self._locked_action_row(session, tenant_id, action_id)
             if ActionState(row.state) is not ActionState.DISPATCHING:
                 raise ConflictError("only a dispatching action can fail")
+            metric_labels = _action_metric_labels(row)
             row.state = ActionState.FAILED.value
             row.failure = failure[:2_000]
             row.version += 1
@@ -1833,7 +1987,7 @@ class DatabaseStore:
                 task_id=UUID(row.task_id),
                 action_id=action_id,
                 kind="action.failed",
-                payload={"failure": failure[:500]},
+                payload={**metric_labels, "failure": failure[:500]},
             )
             session.flush()
             return self._action(row)
@@ -2123,6 +2277,7 @@ class DatabaseStore:
             row = self._locked_action_row(session, tenant_id, action_id)
             if ActionState(row.state) is not ActionState.DISPATCHING:
                 raise ConflictError("only a dispatching action can become unknown")
+            metric_labels = _action_metric_labels(row)
             row.state = ActionState.OUTCOME_UNKNOWN.value
             row.failure = reason[:2_000]
             row.version += 1
@@ -2136,7 +2291,11 @@ class DatabaseStore:
                 task_id=UUID(row.task_id),
                 action_id=action_id,
                 kind="action.outcome_unknown",
-                payload={"reason": reason[:500], "automatic_retry": False},
+                payload={
+                    **metric_labels,
+                    "reason": reason[:500],
+                    "automatic_retry": False,
+                },
             )
             session.flush()
             return self._action(row)
@@ -2463,6 +2622,14 @@ class DatabaseStore:
                 event_hash=event_hash,
             )
         )
+        session.info.setdefault(_PENDING_METRICS_KEY, []).append(
+            CommittedAuditTransition(
+                kind=kind,
+                action_id=str(action_id) if action_id else None,
+                occurred_at=occurred_at,
+                payload=dict(payload),
+            )
+        )
         ledger.sequence = sequence
         ledger.head_hash = event_hash
 
@@ -2769,6 +2936,59 @@ class DatabaseStore:
         if row is None:
             raise NotFoundError("action not found")
         return row
+
+
+def _action_metric_labels(row: ActionRow) -> dict[str, str]:
+    """Expose only executor enums; proposal content never becomes a metric label."""
+    proposal = ProposedAction.model_validate(row.proposal)
+    return {
+        "action_kind": proposal.kind.value,
+        "risk": RiskClass(row.risk).value,
+    }
+
+
+def _redacted_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Allow only hashes, bounded enums, counters, and booleans into CLI output."""
+    safe: dict[str, Any] = {}
+    redacted: list[str] = []
+    action_kinds = {item.value for item in ActionKind}
+    step_kinds = {item.value for item in MissionStepKind}
+    risks = {item.value for item in RiskClass}
+    for key, value in sorted(payload.items()):
+        accepted: Any | None = None
+        if key.endswith("_sha256"):
+            accepted = _redacted_hash(value)
+        elif key == "action_kind" and isinstance(value, str) and value in action_kinds:
+            accepted = value
+        elif key == "kind" and isinstance(value, str) and value in step_kinds:
+            accepted = value
+        elif key == "risk" and isinstance(value, str) and value in risks:
+            accepted = value
+        elif key == "step_key" and isinstance(value, str):
+            accepted = _redacted_step_key(value)
+        elif key in _AUDIT_BOOLEAN_FIELDS and type(value) is bool:
+            accepted = value
+        elif key in _AUDIT_INTEGER_FIELDS and type(value) is int:
+            accepted = value
+        if accepted is None:
+            redacted.append(key)
+        else:
+            safe[key] = accepted
+    if redacted:
+        safe["redacted_fields"] = redacted
+    return safe
+
+
+def _redacted_hash(value: object) -> str | None:
+    return value if isinstance(value, str) and _AUDIT_HASH.fullmatch(value) else None
+
+
+def _redacted_step_key(value: str) -> str:
+    return value if _AUDIT_STEP_KEY.fullmatch(value) else "<redacted>"
+
+
+def _redacted_event_kind(value: str) -> str:
+    return value if _AUDIT_EVENT_KIND.fullmatch(value) else "<redacted>"
 
 
 def _as_utc(value: datetime) -> datetime:
