@@ -19,6 +19,7 @@ from effect_browser.domain import (
     AutonomyMode,
     AutonomyScope,
     MissionVerdict,
+    canonical_json,
 )
 from effect_browser.engine import (
     CrashAfterCommitDriver,
@@ -184,6 +185,19 @@ def do_browser_task(query: str = typer.Argument(...)) -> None:
 def run_mission(query: str = typer.Argument(...)) -> None:
     """Alias for `do`; retained to make the durable mission boundary explicit."""
     do_browser_task(query)
+
+
+@app.command("replay-mission")
+def replay_mission(mission_id: UUID) -> None:
+    """Print a deterministic, redacted parent/child audit timeline."""
+    settings = get_settings()
+    timeline = _service().store.mission_timeline(
+        settings.default_tenant_id,
+        mission_id,
+    )
+    typer.echo(canonical_json(timeline))
+    if not timeline["audit"]["valid"]:
+        raise typer.Exit(2)
 
 
 @app.command("run")
