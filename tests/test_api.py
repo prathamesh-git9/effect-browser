@@ -140,15 +140,16 @@ def test_api_records_bounded_authority_and_exposes_capabilities(
     assert "reserved for the validated" in reserved_origin.text
 
 
-def test_autopilot_api_accepts_only_a_natural_language_query(
+def test_autopilot_api_defaults_read_only_and_forwards_explicit_grant(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     class StubCoordinator:
-        def execute(self, *, tenant_id, query):
+        def execute(self, *, tenant_id, query, allow_external_commit):
             return {
                 "tenant_id": str(tenant_id),
                 "query": query,
+                "allow_external_commit": allow_external_commit,
                 "verdict": "verified_success",
             }
 
@@ -159,12 +160,22 @@ def test_autopilot_api_accepts_only_a_natural_language_query(
                 "/v1/autopilot",
                 json={"query": "Inspect the status at https://example.com/status."},
             )
+            granted = client.post(
+                "/v1/autopilot",
+                json={
+                    "query": "Submit at https://example.com/form.",
+                    "allow_external_commit": True,
+                },
+            )
     finally:
         api.app.dependency_overrides.pop(api.get_autopilot, None)
 
     assert response.status_code == 200
     assert response.json()["query"].startswith("Inspect the status")
+    assert response.json()["allow_external_commit"] is False
     assert response.json()["verdict"] == "verified_success"
+    assert granted.status_code == 200
+    assert granted.json()["allow_external_commit"] is True
 
 
 def test_mission_api_accepts_one_query_and_returns_the_persisted_dag(
@@ -172,7 +183,7 @@ def test_mission_api_accepts_one_query_and_returns_the_persisted_dag(
     monkeypatch,
 ) -> None:
     class StubCoordinator:
-        def execute(self, *, tenant_id, query):
+        def execute(self, *, tenant_id, query, allow_external_commit):
             return {
                 "mission": {
                     "id": "40000000-0000-0000-0000-000000000004",
@@ -180,6 +191,7 @@ def test_mission_api_accepts_one_query_and_returns_the_persisted_dag(
                     "query": query,
                     "status": "succeeded",
                 },
+                "allow_external_commit": allow_external_commit,
                 "steps": [
                     {
                         "key": "source_one",
@@ -206,11 +218,33 @@ def test_mission_api_accepts_one_query_and_returns_the_persisted_dag(
         api.app.dependency_overrides.pop(api.get_mission_coordinator, None)
 
     assert response.status_code == 200
+    assert response.json()["allow_external_commit"] is False
     assert response.json()["verdict"] == "completed"
     assert [step["kind"] for step in response.json()["steps"]] == [
         "research",
         "research",
     ]
+
+
+def test_mission_api_rejects_commit_grant_that_contradicts_query(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with client_for(tmp_path, monkeypatch) as client:
+        response = client.post(
+            "/v1/missions",
+            json={
+                "query": (
+                    "Prepare only; do not submit at http://127.0.0.1:8000/demo-shop."
+                ),
+                "allow_external_commit": True,
+            },
+        )
+        missions = client.get("/v1/missions")
+
+    assert response.status_code == 422
+    assert "contradicts" in response.json()["error"]["detail"]
+    assert missions.json() == []
 
 
 def test_mission_owned_child_cannot_run_through_generic_task_endpoint(

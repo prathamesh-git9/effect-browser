@@ -160,7 +160,14 @@ def create_task(
 
 
 @app.command("do")
-def do_browser_task(query: str = typer.Argument(...)) -> None:
+def do_browser_task(
+    query: str = typer.Argument(...),
+    commit: bool = typer.Option(
+        False,
+        "--commit",
+        help="Explicitly grant at most one reviewed external commit.",
+    ),
+) -> None:
     """Decompose and run one multi-search/browser mission from one query."""
     settings = get_settings()
     service = _service()
@@ -172,6 +179,7 @@ def do_browser_task(query: str = typer.Argument(...)) -> None:
     ).execute(
         tenant_id=settings.default_tenant_id,
         query=query,
+        allow_external_commit=commit,
     )
     console.print_json(result.model_dump_json())
     if result.verdict not in {
@@ -182,9 +190,16 @@ def do_browser_task(query: str = typer.Argument(...)) -> None:
 
 
 @app.command("mission")
-def run_mission(query: str = typer.Argument(...)) -> None:
+def run_mission(
+    query: str = typer.Argument(...),
+    commit: bool = typer.Option(
+        False,
+        "--commit",
+        help="Explicitly grant at most one reviewed external commit.",
+    ),
+) -> None:
     """Alias for `do`; retained to make the durable mission boundary explicit."""
-    do_browser_task(query)
+    do_browser_task(query, commit)
 
 
 @app.command("replay-mission")

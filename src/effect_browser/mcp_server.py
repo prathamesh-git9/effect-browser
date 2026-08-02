@@ -30,7 +30,10 @@ def create_mcp_server():
     server = FastMCP("effect-browser")
 
     @server.tool()
-    def do_browser_task(query: str) -> dict:
+    def do_browser_task(
+        query: str,
+        allow_external_commit: bool = False,
+    ) -> dict:
         """Decompose and run one cited multi-search/browser mission."""
         settings = get_settings()
         service = get_service()
@@ -42,6 +45,7 @@ def create_mcp_server():
         ).execute(
             tenant_id=settings.default_tenant_id,
             query=query,
+            allow_external_commit=allow_external_commit,
         )
         return result.model_dump(mode="json")
 

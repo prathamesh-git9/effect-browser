@@ -210,11 +210,12 @@ class ResearchBody(BaseModel):
 
 class AutopilotBody(BaseModel):
     query: str = Field(min_length=1, max_length=4_000)
+    allow_external_commit: bool = False
 
 
 app = FastAPI(
     title="Effect Browser",
-    version="0.4.0",
+    version="0.4.1",
     description=(
         "Durable multi-search and browser missions with honest effect semantics."
     ),
@@ -325,7 +326,11 @@ def run_autopilot(
     coordinator: Annotated[AutopilotCoordinator, Depends(get_autopilot)],
 ):
     """Resolve, persist, execute, and verify one natural-language browser task."""
-    return coordinator.execute(tenant_id=who.tenant_id, query=body.query)
+    return coordinator.execute(
+        tenant_id=who.tenant_id,
+        query=body.query,
+        allow_external_commit=body.allow_external_commit,
+    )
 
 
 @app.post("/v1/missions")
@@ -335,7 +340,11 @@ def run_mission(
     coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
 ):
     """Decompose, persist, execute, and truthfully assess one bounded mission."""
-    return coordinator.execute(tenant_id=who.tenant_id, query=body.query)
+    return coordinator.execute(
+        tenant_id=who.tenant_id,
+        query=body.query,
+        allow_external_commit=body.allow_external_commit,
+    )
 
 
 @app.get("/v1/missions")

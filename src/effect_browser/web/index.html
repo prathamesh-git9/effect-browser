@@ -16,7 +16,7 @@
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">ONE QUERY / PARALLEL RESEARCH / DURABLE EFFECTS / V0.4</p>
+        <p class="kicker">ONE QUERY / PARALLEL RESEARCH / DURABLE EFFECTS / V0.4.1</p>
         <h1>Say the outcome.<br><em>Trace every claim.</em></h1>
         <p class="intro">Effect Browser turns a compound request into a persisted
           dependency graph, runs independent cited searches concurrently, and routes
@@ -33,10 +33,12 @@
             <textarea id="autopilot-query" rows="5" required
               placeholder="Apply to the role at https://… using &quot;C:\approved\resume.pdf&quot;">Order three encrypted backup drives at http://127.0.0.1:8000 without a duplicate order.</textarea>
           </label>
+          <label class="checkbox"><input id="mission-allow-external-commit"
+            type="checkbox"> Grant at most one reviewed external commit</label>
           <button class="primary" type="submit">Plan and run mission</button>
           <p class="contract">Independent research can run in parallel. The original
-            query remains the authority boundary: decomposition gets one shared
-            commit budget and cannot invent extra submissions.</p>
+            query and this explicit grant are both required for any commit.
+            Decomposition cannot invent authority or extra submissions.</p>
         </form>
         <details class="advanced">
           <summary>Advanced task controls</summary>

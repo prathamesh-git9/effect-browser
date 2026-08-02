@@ -332,7 +332,10 @@ $("#autopilot-form").addEventListener("submit", async (event) => {
   await mutate(event.submitter, async () => {
     const result = await api("/v1/missions", {
       method: "POST",
-      body: JSON.stringify({ query: $("#autopilot-query").value }),
+      body: JSON.stringify({
+        query: $("#autopilot-query").value,
+        allow_external_commit: $("#mission-allow-external-commit").checked,
+      }),
     });
     renderMission(result);
     state.selected = actualChildTaskId(result);
