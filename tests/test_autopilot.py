@@ -34,6 +34,8 @@ from effect_browser.providers.base import ProviderError
 from effect_browser.store import ConflictError
 from tests.conftest import BASE_URL, TENANT, FakeDriver, RemoteSystem
 
+DEMO_URL = f"{BASE_URL}/demo-shop"
+
 
 class FinishOnlyPlanner:
     name = "deterministic"
@@ -194,7 +196,7 @@ def test_resume_reports_the_persisted_two_key_authority_decision(
     )
     first = coordinator.execute(
         tenant_id=TENANT,
-        query=f"{query} at {BASE_URL}.",
+        query=f"{query} at {DEMO_URL}.",
         allow_external_commit=caller_granted,
     )
 
@@ -247,7 +249,7 @@ def test_resume_rejects_tampered_persisted_task_authority(
     )
     first = coordinator.execute(
         tenant_id=TENANT,
-        query=f"Inspect the form at {BASE_URL}.",
+        query=f"Inspect the form at {DEMO_URL}.",
         allow_external_commit=True,
     )
     created = next(
@@ -344,7 +346,7 @@ def test_expected_finish_with_rendered_evidence_is_verified(
     ).execute(
         tenant_id=TENANT,
         query=(
-            f"Inspect the service status at {BASE_URL} and verify Service operational."
+            f"Inspect the service status at {DEMO_URL} and verify Service operational."
         ),
     )
 
@@ -368,7 +370,7 @@ def test_finish_evidence_cannot_be_copied_from_untrusted_page_content(
     with pytest.raises(ValueError, match="exact phrase from the user instruction"):
         coordinator.execute(
             tenant_id=TENANT,
-            query=f"Inspect the service status at {BASE_URL}.",
+            query=f"Inspect the service status at {DEMO_URL}.",
         )
 
 
