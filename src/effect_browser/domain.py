@@ -62,6 +62,12 @@ class MissionStepStatus(StrEnum):
     SKIPPED = "skipped"
 
 
+# The scheduler may cap active threads, but accepting an arbitrarily broad graph
+# would still persist unbounded ready work and make replay behavior configuration-
+# dependent.  The plan itself therefore carries a small, deterministic width bound.
+MAX_MISSION_READY_WIDTH = 4
+
+
 class MissionVerdict(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
@@ -650,6 +656,8 @@ class MissionPlan(DomainModel):
         if len(set(keys)) != len(keys):
             raise ValueError("mission step keys must be unique")
         known: set[str] = set()
+        wave_by_key: dict[str, int] = {}
+        wave_widths: dict[int, int] = {}
         for step in self.steps:
             missing = set(step.depends_on) - known
             if missing:
@@ -657,7 +665,19 @@ class MissionPlan(DomainModel):
                     "mission steps must be topologically ordered; missing "
                     f"dependencies for {step.key}: {', '.join(sorted(missing))}"
                 )
+            wave = (
+                max(wave_by_key[key] for key in step.depends_on) + 1
+                if step.depends_on
+                else 0
+            )
+            wave_widths[wave] = wave_widths.get(wave, 0) + 1
+            if wave_widths[wave] > MAX_MISSION_READY_WIDTH:
+                raise ValueError(
+                    "mission graph ready wave exceeds the maximum width of "
+                    f"{MAX_MISSION_READY_WIDTH}"
+                )
             known.add(step.key)
+            wave_by_key[step.key] = wave
         return self
 
 
