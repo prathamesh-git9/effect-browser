@@ -19,8 +19,10 @@ class JobHarnessPlanner:
     name = "job-harness"
 
     def __init__(self, mode: str = "real", resume_path: Path | None = None) -> None:
-        if mode not in {"real", "fake_success", "reject"}:
-            raise ValueError("job harness mode must be real, fake_success, or reject")
+        if mode not in {"real", "delayed_submit", "fake_success", "reject"}:
+            raise ValueError(
+                "job harness mode must be real, delayed_submit, fake_success, or reject"
+            )
         self.mode = mode
         self.resume_path = resume_path
 

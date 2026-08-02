@@ -1,4 +1,11 @@
-const state = { tasks: [], selected: null, detail: null, profiles: [], profile: null };
+const state = {
+  tasks: [],
+  selected: null,
+  detail: null,
+  profiles: [],
+  profile: null,
+  mission: null,
+};
 const $ = (selector) => document.querySelector(selector);
 
 async function api(path, options = {}) {
@@ -26,6 +33,12 @@ function short(value, size = 12) {
 
 function baseName(value) {
   return String(value ?? "").split(/[\\/]/).pop();
+}
+
+function actualChildTaskId(result) {
+  return result.steps
+    .map((step) => step.output?.task?.id)
+    .find(Boolean) ?? null;
 }
 
 function renderOutgoingReview(review) {
@@ -87,6 +100,7 @@ async function mutate(button, work) {
     await work();
     await loadTasks();
     if (state.selected) await selectTask(state.selected);
+    if (state.mission) await loadMission(state.mission.mission.id);
     await verifyAudit();
   } catch (error) {
     toast(error.message);
@@ -119,6 +133,16 @@ function render() {
   $("#task-id").textContent = `TASK ${task.id}`;
   $("#task-title").textContent = task.instruction;
   $("#task-status").textContent = task.status.replaceAll("_", " ");
+  $("#run-task").textContent = state.detail.parent_mission_id
+    ? "Run parent mission"
+    : "Run / resume";
+  $("#run-note").textContent = task.autonomy.allow_query_target_origin
+    ? state.detail.parent_mission_id
+      ? `Mission-owned child / parent ${state.detail.parent_mission_id.slice(0, 8)} / direct task runs blocked`
+      : `One-query run / max ${task.autonomy.max_external_commits} external commits / proof required`
+    : task.autonomy.mode === "bounded"
+    ? `Bounded unattended / max ${task.autonomy.max_external_commits} external commits`
+    : "Safe actions run automatically; external effects require approval.";
   $("#action-count").textContent = `${actions.length} actions / cursor ${task.current_ordinal}`;
   $("#actions").innerHTML = actions.map((action, index) => `
     <article class="action">
@@ -132,6 +156,48 @@ function render() {
     <div class="event"><span>${String(event.sequence).padStart(3, "0")}</span>
     ${escapeHtml(event.kind)} <span>${short(event.event_hash)}</span></div>`).join("");
   renderGate(actions[task.current_ordinal]);
+}
+
+function renderMission(result) {
+  state.mission = result;
+  $("#empty-state").hidden = true;
+  $("#mission-view").hidden = false;
+  $("#mission-id").textContent = `MISSION ${result.mission.id}`;
+  $("#mission-title").textContent = result.mission.plan_summary;
+  $("#mission-status").textContent = result.verdict.replaceAll("_", " ");
+  $("#mission-message").textContent = result.message;
+  $("#mission-count").textContent = `${result.steps.length} persisted steps / max ${result.mission.max_external_commits} commits`;
+  $("#mission-steps").innerHTML = result.steps.map((step, index) => `
+    <article class="action mission-step">
+      <span class="ordinal">${String(index + 1).padStart(2, "0")}</span>
+      <div><h3>${escapeHtml(step.instruction)}</h3>
+      <p>${escapeHtml(step.kind)}${step.depends_on.length
+        ? ` / after ${escapeHtml(step.depends_on.join(", "))}`
+        : " / independent"}</p>
+      <code>${escapeHtml(step.output_sha256 ? short(step.output_sha256, 20) : "no output")}</code></div>
+      <span class="action-state">${escapeHtml(step.status.replaceAll("_", " "))}</span>
+    </article>`).join("");
+  const answer = $("#mission-answer");
+  if (result.final_answer || result.citation_urls.length) {
+    answer.hidden = false;
+    answer.innerHTML = `${result.final_answer
+      ? `<p class="kicker">EVIDENCE-BOUND RESULT</p><p>${escapeHtml(result.final_answer)}</p>`
+      : ""}
+      ${result.citation_urls.length
+        ? `<details open><summary>${result.citation_urls.length} cited sources</summary>
+          <div class="events">${result.citation_urls.map((url) =>
+            `<a class="event source-link" href="${escapeHtml(url)}" target="_blank"
+              rel="noreferrer">${escapeHtml(url)}</a>`).join("")}</div></details>`
+        : ""}`;
+  } else {
+    answer.hidden = true;
+    answer.innerHTML = "";
+  }
+}
+
+async function loadMission(id) {
+  const detail = await api(`/v1/missions/${id}`);
+  renderMission(detail.result);
 }
 
 function renderGate(action) {
@@ -261,6 +327,23 @@ async function verifyAudit() {
   }
 }
 
+$("#autopilot-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await mutate(event.submitter, async () => {
+    const result = await api("/v1/missions", {
+      method: "POST",
+      body: JSON.stringify({
+        query: $("#autopilot-query").value,
+        allow_external_commit: $("#mission-allow-external-commit").checked,
+      }),
+    });
+    renderMission(result);
+    state.selected = actualChildTaskId(result);
+    if (!state.selected) $("#task-view").hidden = true;
+    toast(`${result.verdict.replaceAll("_", " ")} / ${result.steps.length} steps`);
+  });
+});
+
 $("#create-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   await mutate(event.submitter, async () => {
@@ -273,10 +356,21 @@ $("#create-form").addEventListener("submit", async (event) => {
         profile_id: $("#profile-id").value.trim() || null,
         document_path: $("#document-path").value.trim() || null,
         document_sha256: $("#document-sha256").value.trim() || null,
+        autonomy: {
+          mode: $("#autonomy-mode").value,
+          allow_file_uploads: $("#allow-file-uploads").checked,
+          allow_external_commits: $("#allow-external-commits").checked,
+          max_external_commits: Number($("#max-external-commits").value),
+        },
       }),
     });
     state.selected = task.id;
-    toast("Durable plan created");
+    if ($("#autonomy-mode").value === "bounded") {
+      await api(`/v1/tasks/${task.id}/run`, { method: "POST" });
+      toast("Bounded unattended run started");
+    } else {
+      toast("Durable plan created");
+    }
   });
 });
 $("#profile-select").addEventListener("change", (event) => loadProfile(event.target.value).catch((error) => toast(error.message)));
@@ -320,11 +414,33 @@ $("#answer-form").addEventListener("submit", async (event) => {
 });
 $("#run-task").addEventListener("click", (event) => mutate(
   event.currentTarget,
-  () => api(`/v1/tasks/${state.selected}/run`, { method: "POST" }),
+  async () => {
+    if (state.detail.parent_mission_id) {
+      const result = await api(
+        `/v1/missions/${state.detail.parent_mission_id}/run`,
+        { method: "POST" },
+      );
+      renderMission(result);
+      return;
+    }
+    await api(`/v1/tasks/${state.selected}/run`, { method: "POST" });
+  },
+));
+$("#run-mission").addEventListener("click", (event) => mutate(
+  event.currentTarget,
+  async () => {
+    const result = await api(
+      `/v1/missions/${state.mission.mission.id}/run`,
+      { method: "POST" },
+    );
+    renderMission(result);
+    state.selected = actualChildTaskId(result) ?? state.selected;
+  },
 ));
 $("#refresh").addEventListener("click", async () => {
   await loadTasks();
   if (state.selected) await selectTask(state.selected);
+  if (state.mission) await loadMission(state.mission.mission.id);
   await verifyAudit();
 });
 Promise.all([loadTasks(), loadProfiles(), verifyAudit()]).catch((error) => toast(error.message));

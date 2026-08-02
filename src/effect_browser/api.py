@@ -15,18 +15,24 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 from pydantic import BaseModel, Field, model_validator
 
+from effect_browser.autopilot import AutopilotCoordinator
 from effect_browser.browser.playwright import PlaywrightDriver
+from effect_browser.capabilities import capability_catalog
+from effect_browser.capability_target import create_capability_router
 from effect_browser.config import get_settings
 from effect_browser.demo_target import create_demo_router
 from effect_browser.domain import (
     AnswerSensitivity,
     AnswerSource,
+    AutonomyScope,
     BrowserReceipt,
     Resolution,
     VerificationState,
 )
 from effect_browser.engine import EffectBrowserService
+from effect_browser.hard_target import create_hard_target_router
 from effect_browser.job_target import create_demo_job_router
+from effect_browser.mission import MissionCoordinator
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import (
     DeterministicPlanner,
@@ -118,7 +124,7 @@ def planner(name: str):
     return planners[name]
 
 
-def driver() -> PlaywrightDriver:
+def driver(extra_allowed_origins: tuple[str, ...] = ()) -> PlaywrightDriver:
     settings = get_settings()
     return PlaywrightDriver(
         executable_path=settings.browser_executable,
@@ -126,6 +132,22 @@ def driver() -> PlaywrightDriver:
         sandbox=settings.browser_sandbox,
         artifacts_directory=settings.artifacts_directory,
         allowed_upload_roots=settings.allowed_upload_roots,
+        allowed_upload_origins=settings.allowed_upload_origins,
+        allowed_origins=(*settings.allowed_origins, *extra_allowed_origins),
+    )
+
+
+def get_autopilot() -> AutopilotCoordinator:
+    return AutopilotCoordinator(service=get_service(), settings=get_settings())
+
+
+def get_mission_coordinator() -> MissionCoordinator:
+    settings = get_settings()
+    return MissionCoordinator(
+        store=get_store(),
+        autopilot=get_autopilot(),
+        settings=settings,
+        max_parallel_research=settings.mission_max_parallel_research,
     )
 
 
@@ -139,9 +161,15 @@ class CreateTaskBody(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    autonomy: AutonomyScope = Field(default_factory=AutonomyScope)
 
     @model_validator(mode="after")
     def document_fields_are_paired(self) -> CreateTaskBody:
+        if self.autonomy.allow_query_target_origin:
+            raise ValueError(
+                "allow_query_target_origin is reserved for the validated "
+                "/v1/autopilot path"
+            )
         if (self.document_path is None) != (self.document_sha256 is None):
             raise ValueError(
                 "document_path and document_sha256 must be supplied together"
@@ -180,10 +208,17 @@ class ResearchBody(BaseModel):
     urls: tuple[str, ...] = Field(min_length=1, max_length=5)
 
 
+class AutopilotBody(BaseModel):
+    query: str = Field(min_length=1, max_length=4_000)
+    allow_external_commit: bool = False
+
+
 app = FastAPI(
     title="Effect Browser",
-    version="0.2.0",
-    description="Crash-safe browser operations with honest effect semantics.",
+    version="0.4.1",
+    description=(
+        "Durable multi-search and browser missions with honest effect semantics."
+    ),
     lifespan=lifespan,
 )
 
@@ -200,7 +235,7 @@ async def request_log(request: Request, call_next):
         return response
     finally:
         route = request.scope.get("route")
-        path = getattr(route, "path", request.url.path)
+        path = getattr(route, "path", None) or "<unmatched>"
         REQUESTS.labels(request.method, path, status).inc()
         HTTP_LOG.info(
             json.dumps(
@@ -261,6 +296,11 @@ def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get("/v1/capabilities")
+def capabilities():
+    return capability_catalog()
+
+
 @app.post("/v1/tasks", status_code=201)
 def create_task(
     body: CreateTaskBody,
@@ -275,7 +315,66 @@ def create_task(
         profile_id=body.profile_id,
         document_path=body.document_path,
         document_sha256=body.document_sha256,
+        autonomy=body.autonomy,
     )
+
+
+@app.post("/v1/autopilot")
+def run_autopilot(
+    body: AutopilotBody,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[AutopilotCoordinator, Depends(get_autopilot)],
+):
+    """Resolve, persist, execute, and verify one natural-language browser task."""
+    return coordinator.execute(
+        tenant_id=who.tenant_id,
+        query=body.query,
+        allow_external_commit=body.allow_external_commit,
+    )
+
+
+@app.post("/v1/missions")
+def run_mission(
+    body: AutopilotBody,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+):
+    """Decompose, persist, execute, and truthfully assess one bounded mission."""
+    return coordinator.execute(
+        tenant_id=who.tenant_id,
+        query=body.query,
+        allow_external_commit=body.allow_external_commit,
+    )
+
+
+@app.get("/v1/missions")
+def list_missions(
+    who: Annotated[Identity, Depends(identity)],
+    service: Annotated[EffectBrowserService, Depends(get_service)],
+):
+    return service.store.list_missions(who.tenant_id)
+
+
+@app.get("/v1/missions/{mission_id}")
+def mission_detail(
+    mission_id: UUID,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+) -> dict[str, Any]:
+    result = coordinator.inspect(tenant_id=who.tenant_id, mission_id=mission_id)
+    return {
+        "result": result,
+        "events": coordinator.store.mission_events(who.tenant_id, mission_id),
+    }
+
+
+@app.post("/v1/missions/{mission_id}/run")
+def resume_mission(
+    mission_id: UUID,
+    who: Annotated[Identity, Depends(identity)],
+    coordinator: Annotated[MissionCoordinator, Depends(get_mission_coordinator)],
+):
+    return coordinator.run(tenant_id=who.tenant_id, mission_id=mission_id)
 
 
 @app.get("/v1/tasks")
@@ -350,6 +449,10 @@ def task_detail(
     actions = service.store.list_actions(who.tenant_id, task_id)
     return {
         "task": task,
+        "parent_mission_id": service.store.mission_for_child_task(
+            who.tenant_id,
+            task_id,
+        ),
         "actions": [
             {
                 **action.model_dump(mode="json"),
@@ -380,7 +483,13 @@ def run_task(
     who: Annotated[Identity, Depends(identity)],
     service: Annotated[EffectBrowserService, Depends(get_service)],
 ):
-    browser = driver()
+    task = service.store.get_task(who.tenant_id, task_id)
+    if mission_id := service.store.mission_for_child_task(who.tenant_id, task_id):
+        raise ConflictError(
+            f"task is owned by mission {mission_id}; resume the parent mission"
+        )
+    extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+    browser = driver(extra_origins)
     try:
         return service.run(tenant_id=who.tenant_id, task_id=task_id, driver=browser)
     finally:
@@ -457,7 +566,10 @@ def reconcile_action(
     who: Annotated[Identity, Depends(identity)],
     service: Annotated[EffectBrowserService, Depends(get_service)],
 ):
-    browser = driver()
+    action = service.store.get_action(who.tenant_id, action_id)
+    task = service.store.get_task(who.tenant_id, action.task_id)
+    extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+    browser = driver(extra_origins)
     try:
         receipt = service.reconcile(
             tenant_id=who.tenant_id,
@@ -508,6 +620,8 @@ def verify_audit(
 
 app.include_router(create_demo_router(get_store))
 app.include_router(create_demo_job_router(get_store))
+app.include_router(create_capability_router())
+app.include_router(create_hard_target_router())
 
 web_dir = Path(__file__).parent / "web"
 app.mount("/assets", StaticFiles(directory=web_dir), name="assets")

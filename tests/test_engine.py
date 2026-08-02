@@ -9,7 +9,10 @@ from sqlalchemy import text
 from effect_browser.domain import (
     ActionKind,
     ActionState,
+    AutonomyMode,
+    AutonomyScope,
     BrowserAction,
+    BrowserReceipt,
     ElementCandidate,
     Locator,
     Observation,
@@ -17,6 +20,7 @@ from effect_browser.domain import (
     PageSnapshot,
     PolicyDecision,
     ProposedAction,
+    ReconciliationSpec,
     RiskClass,
     TaskStatus,
     digest,
@@ -24,8 +28,9 @@ from effect_browser.domain import (
 )
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlanner
+from effect_browser.providers.base import ProviderError
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
-from effect_browser.transmission import fingerprint_request
+from effect_browser.transmission import TransmissionReviewError, fingerprint_request
 
 from .conftest import BASE_URL, TENANT, FakeDriver, RemoteSystem
 
@@ -65,6 +70,229 @@ def test_external_commit_requires_bound_approval(service) -> None:
     assert paused.next_action.state is ActionState.APPROVAL_REQUIRED
     assert paused.next_action.observation_sha256
     assert remote.commits == 0
+
+
+def test_normal_run_never_follows_off_origin_reconciliation(service) -> None:
+    class OffOriginPlanner:
+        name = "off-origin-reconciliation"
+
+        @staticmethod
+        def plan(request):
+            reference = f"OFF-{str(request.task_id)[:8]}"
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the controlled target.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Commit once"),
+                    description="Commit one controlled effect.",
+                    effect_key=reference,
+                    expected_outcome="One controlled effect.",
+                    reconciliation=ReconciliationSpec(
+                        url="https://untrusted.example.test/echo",
+                        expected_text=reference,
+                        external_reference=reference,
+                    ),
+                ),
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    description="Finish only with authoritative evidence.",
+                ),
+            )
+
+    class ReconcileProbe(FakeDriver):
+        reconciliations = 0
+
+        def reconcile(self, spec):
+            self.reconciliations += 1
+            return super().reconcile(spec)
+
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Never leak a receipt lookup across the origin boundary.",
+        start_url=BASE_URL,
+        planner=OffOriginPlanner(),
+    )
+    first = ReconcileProbe(remote)
+    paused = service.run(tenant_id=TENANT, task_id=task.id, driver=first)
+    action = paused.next_action
+    assert action is not None
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=action.id,
+        expected_version=action.version,
+        actor_id="test-operator",
+    )
+
+    second = ReconcileProbe(remote)
+    stopped = service.run(tenant_id=TENANT, task_id=task.id, driver=second)
+
+    assert remote.commits == 1
+    assert second.reconciliations == 0
+    assert stopped.next_action is not None
+    assert stopped.next_action.state is ActionState.OUTCOME_UNKNOWN
+    assert "origin is not allowed" in stopped.message
+
+
+def test_rehydration_replays_reversible_option_clicks(service) -> None:
+    class OptionPlanner:
+        name = "option-replay"
+
+        @staticmethod
+        def plan(request):
+            reference = f"OPTION-{str(request.task_id)[:8]}"
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the controlled target.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.CLICK,
+                    locator=Locator(role="option", name="Dublin"),
+                    description="Select the observed reversible option.",
+                    target_interaction="option",
+                ),
+                ProposedAction(
+                    kind=ActionKind.SUBMIT,
+                    locator=Locator(role="button", name="Commit once"),
+                    description="Commit the option-bound effect.",
+                    effect_key=reference,
+                    expected_outcome="One controlled effect.",
+                    reconciliation=ReconciliationSpec(
+                        url=f"{BASE_URL}/receipt",
+                        expected_text=reference,
+                        external_reference=reference,
+                    ),
+                ),
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    description="Finish with authoritative evidence.",
+                ),
+            )
+
+    class OptionDriver(FakeDriver):
+        option_clicks = 0
+
+        def execute(self, action):
+            if action.kind is ActionKind.CLICK:
+                self.option_clicks += 1
+            return super().execute(action)
+
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Replay reversible option state after restart.",
+        start_url=BASE_URL,
+        planner=OptionPlanner(),
+    )
+    first = OptionDriver(remote)
+    paused = service.run(tenant_id=TENANT, task_id=task.id, driver=first)
+    assert first.option_clicks == 1
+    action = paused.next_action
+    assert action is not None
+    service.store.approve_action(
+        tenant_id=TENANT,
+        action_id=action.id,
+        expected_version=action.version,
+        actor_id="test-operator",
+    )
+
+    restarted = OptionDriver(remote)
+    result = service.run(tenant_id=TENANT, task_id=task.id, driver=restarted)
+
+    assert restarted.option_clicks == 1
+    assert result.task.status is TaskStatus.SUCCEEDED
+
+
+def test_zero_request_submit_preview_can_be_audited_as_superseded(service) -> None:
+    class NativeValidationDriver(FakeDriver):
+        def preview_submit(self, action, observation_sha256):
+            raise TransmissionReviewError(
+                "exact review requires one outgoing request; the submit produced 0"
+            )
+
+    task = create(service)
+    stopped = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=NativeValidationDriver(RemoteSystem()),
+    )
+    failed = stopped.next_action
+    assert failed is not None
+    assert failed.state is ActionState.FAILED
+
+    superseded = service.store.supersede_failed_submit_preview(
+        tenant_id=TENANT,
+        action_id=failed.id,
+        expected_version=failed.version,
+        actor_id="test-operator",
+        authorization_basis="Native validation produced no request.",
+    )
+
+    assert superseded.state is ActionState.SUPERSEDED
+    resumed = service.store.get_task(TENANT, task.id)
+    assert resumed.current_ordinal == failed.ordinal + 1
+    assert resumed.status is TaskStatus.QUEUED
+    with service.store.engine.connect() as connection:
+        released = connection.execute(
+            text("SELECT effect_key FROM actions WHERE id=:action_id"),
+            {"action_id": str(failed.id)},
+        ).scalar_one()
+    assert released is None
+    assert service.store.verify_audit(TENANT).valid
+
+
+def test_bounded_autonomy_commits_without_per_action_intervention(service) -> None:
+    remote = RemoteSystem()
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Order once under an explicit unattended task scope.",
+        start_url=BASE_URL,
+        planner=DeterministicPlanner(),
+        autonomy=AutonomyScope(
+            mode=AutonomyMode.BOUNDED,
+            allow_external_commits=True,
+            max_external_commits=1,
+        ),
+    )
+
+    reviewed = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+    assert reviewed.next_action is not None
+    assert reviewed.next_action.state is ActionState.PREPARED
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+
+    assert result.task.status is TaskStatus.SUCCEEDED
+    assert remote.commits == 1
+    submit = next(
+        action
+        for action in service.store.list_actions(TENANT, task.id)
+        if action.proposal.kind is ActionKind.SUBMIT
+    )
+    approval = service.store.latest_approval(TENANT, submit.id)
+    assert approval is not None
+    assert approval.actor_id.startswith("bounded-autonomy:")
+    assert approval.payload_sha256 == submit.proposal.outgoing_review.payload_sha256
+    approved_event = next(
+        event
+        for event in service.store.events(TENANT, task.id)
+        if event.kind == "action.approved"
+    )
+    assert "exact reviewed request" in approved_event.payload["authorization_basis"]
+    assert service.store.verify_audit(TENANT).valid
 
 
 def test_submit_without_independent_receipt_never_claims_success(service) -> None:
@@ -181,6 +409,41 @@ def test_crash_after_commit_is_reconciled_without_retry(service) -> None:
     assert remote.commits == 1
 
 
+def test_delayed_dispatch_false_negative_requires_external_receipt(service) -> None:
+    task, approved = prepare_and_approve(service, RemoteSystem())
+    service.store.start_dispatch(TENANT, approved.id)
+    failed = service.store.fail_action(
+        TENANT,
+        approved.id,
+        (
+            "exact request was blocked before transmission: approved outgoing "
+            "request was not produced; nothing was sent"
+        ),
+    )
+    receipt = BrowserReceipt(
+        external_id="confirmation-123",
+        url=f"{BASE_URL}/confirmation",
+        evidence_sha256=digest({"confirmation": "Application received"}),
+        captured_at=utc_now(),
+    )
+
+    recovered = service.store.recover_false_pretransmission_failure(
+        tenant_id=TENANT,
+        action_id=failed.id,
+        receipt=receipt,
+        actor_id="test-reconciler",
+        authorization_basis="A synthetic authoritative confirmation was observed.",
+    )
+
+    assert recovered.state is ActionState.SUCCEEDED
+    assert service.store.get_receipt(TENANT, failed.id) == receipt
+    assert service.store.get_task(TENANT, task.id).status in {
+        TaskStatus.QUEUED,
+        TaskStatus.SUCCEEDED,
+    }
+    assert service.store.verify_audit(TENANT).valid
+
+
 def test_page_drift_invalidates_previous_approval(service) -> None:
     remote = RemoteSystem()
     task, approved = prepare_and_approve(service, remote)
@@ -192,6 +455,15 @@ def test_page_drift_invalidates_previous_approval(service) -> None:
     assert result.next_action.state is ActionState.INVALIDATED
     assert remote.commits == 0
     assert service.store.latest_approval(TENANT, approved.id) is not None
+
+    reviewed_again = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(remote),
+    )
+    assert reviewed_again.next_action is not None
+    assert reviewed_again.next_action.state is ActionState.APPROVAL_REQUIRED
+    assert remote.commits == 0
 
 
 def test_stale_approval_version_is_rejected(service) -> None:
@@ -527,3 +799,86 @@ def test_reactive_task_requires_verified_fact_before_planner_can_guess(
     )
     assert resumed.state is ActionState.SUCCEEDED
     assert service.store.get_task(TENANT, task.id).status is TaskStatus.QUEUED
+
+
+def test_reactive_provider_failure_becomes_truthful_blocker(service) -> None:
+    class FailingPlanner:
+        name = "failing-reactive"
+
+        def choose(self, _request):
+            raise ProviderError("synthetic provider outage")
+
+    class SnapshotDriver(FakeDriver):
+        def snapshot(self) -> PageSnapshot:
+            observation = self.observe()
+            return PageSnapshot(
+                url=observation.url,
+                title=observation.title,
+                state_sha256=observation.state_sha256,
+                text_excerpt="No challenge and no controls.",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+
+    service.step_planners = {"failing-reactive": FailingPlanner()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Stop honestly if planning is unavailable.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner("failing-reactive"),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=SnapshotDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.BLOCKED
+    assert result.next_action is None
+    assert "success is not claimed" in result.message
+
+
+def test_reactive_step_budget_blocks_instead_of_overflowing_schema(service) -> None:
+    class ThirtyStepPlanner:
+        name = "step-budget"
+
+        def plan(self, _request):
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=BASE_URL,
+                    description="Open the bounded target.",
+                ),
+                *(
+                    ProposedAction(
+                        kind=ActionKind.WAIT,
+                        wait_ms=100,
+                        description=f"Bounded wait {number}.",
+                    )
+                    for number in range(1, 30)
+                ),
+            )
+
+    class MustNotChoose:
+        name = "step-budget"
+
+        def choose(self, _request):
+            raise AssertionError("provider must not run after the 30-step budget")
+
+    service.step_planners = {"step-budget": MustNotChoose()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Never run more than thirty browser steps.",
+        start_url=BASE_URL,
+        planner=ThirtyStepPlanner(),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=FakeDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.BLOCKED
+    assert "step budget exhausted" in result.message

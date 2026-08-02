@@ -18,7 +18,8 @@ from effect_browser.domain import (
 
 ACTIONABLE_XPATH = (
     "//input | //textarea | //select | //button | //a[@href] | "
-    "//*[@role='button'] | //*[@role='link'] | //*[@contenteditable='true']"
+    "//*[@role='button'] | //*[@role='link'] | //*[@role='option'] | "
+    "//*[@contenteditable='true']"
 )
 COMMIT_WORDS = re.compile(
     r"\b(submit|confirm|purchase|buy|order|send|publish|delete|remove|"
@@ -41,8 +42,9 @@ class ScraplingSnapshotter:
         url: str,
         title: str,
         state_sha256: str,
-        max_candidates: int = 120,
+        max_candidates: int = 500,
         max_text: int = 8_000,
+        save_adaptive: bool = True,
     ) -> PageSnapshot:
         page = self._page(html, url)
         candidates: list[ElementCandidate] = []
@@ -59,9 +61,10 @@ class ScraplingSnapshotter:
             base_key = self._semantic_key(role, name, input_type)
             occurrence = semantic_counts.get(base_key, 0)
             semantic_counts[base_key] = occurrence + 1
-            adaptive_id = f"{base_key}:{occurrence}"
-            page.save(element, adaptive_id)
-            selector = str(element.generate_full_css_selector)
+            adaptive_id = f"{base_key}:{occurrence}" if save_adaptive else None
+            if adaptive_id is not None:
+                page.save(element, adaptive_id)
+            selector = self._selector(page, element)
             href = (
                 urljoin(url, str(element.attrib["href"]))
                 if element.attrib.get("href")
@@ -83,8 +86,19 @@ class ScraplingSnapshotter:
                     role=role,
                     name=name,
                     input_type=input_type,
-                    required="required" in element.attrib,
-                    disabled="disabled" in element.attrib,
+                    required=(
+                        "required" in element.attrib
+                        or str(element.attrib.get("aria-required", "")).casefold()
+                        == "true"
+                    ),
+                    disabled=(
+                        "disabled" in element.attrib
+                        or str(element.attrib.get("aria-disabled", "")).casefold()
+                        == "true"
+                    ),
+                    expanded=(
+                        str(element.attrib.get("aria-expanded", "")).casefold() == "true"
+                    ),
                     filled=bool(current_value),
                     current_value=current_value,
                     href=href,
@@ -210,17 +224,36 @@ class ScraplingSnapshotter:
         return f"candidate-{digest(raw)[:20]}"
 
     @staticmethod
+    def _selector(page: Selector, element: ScraplingElement) -> str:
+        """Prefer identity selectors that also work through open shadow roots."""
+        for attribute in ("id", "data-testid"):
+            value = str(element.attrib.get(attribute, "")).strip()
+            if not value:
+                continue
+            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+            selector = f'[{attribute}="{escaped}"]'
+            if len(page.css(selector)) == 1:
+                return selector
+        return str(element.generate_full_css_selector)
+
+    @staticmethod
     def _interaction(
         element: ScraplingElement,
         name: str,
         href: str | None,
     ) -> str:
+        if href and "download" in element.attrib:
+            return "download"
         if href:
             return "navigation"
         input_type = str(element.attrib.get("type", "")).casefold()
         if input_type == "file":
             return "upload"
-        if input_type == "submit" or COMMIT_WORDS.search(name):
+        if input_type == "submit":
+            return "commit"
+        if str(element.attrib.get("role", "")).strip().casefold() == "option":
+            return "option"
+        if COMMIT_WORDS.search(name):
             return "commit"
         if str(element.tag).casefold() in {"input", "textarea", "select"}:
             return "input"

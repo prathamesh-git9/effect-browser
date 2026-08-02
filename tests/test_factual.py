@@ -145,3 +145,149 @@ def test_human_challenge_stops_before_any_candidate_action() -> None:
     assert choice is not None
     assert choice.kind is ActionKind.HANDOFF
     assert "Human verification" in choice.description
+
+
+def test_verified_combobox_fact_opens_then_selects_one_observed_option() -> None:
+    combobox = ElementCandidate(
+        id="C001",
+        tag="input",
+        role="combobox",
+        name="Country *",
+        input_type="text",
+        required=True,
+        interaction="input",
+        locator=Locator(
+            selector="#country",
+            adaptive_id="candidate-country:0",
+        ),
+    )
+    country_fact = fact("country", "Ireland", VerificationState.VERIFIED)
+
+    open_choice = deterministic_required_choice(
+        text_excerpt="Application",
+        candidates=(combobox,),
+        facts=(country_fact,),
+        document_path=None,
+        document_sha256=None,
+    )
+    option = ElementCandidate(
+        id="C002",
+        tag="div",
+        role="option",
+        name="Ireland +353",
+        interaction="option",
+        locator=Locator(
+            selector="#country-ie",
+            adaptive_id="candidate-country-ie:0",
+        ),
+    )
+    select_choice = deterministic_required_choice(
+        text_excerpt="Application",
+        candidates=(combobox.model_copy(update={"expanded": True}), option),
+        facts=(country_fact,),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert open_choice is not None
+    assert open_choice.kind is ActionKind.PRESS
+    assert open_choice.key == "ArrowDown"
+    assert select_choice is not None
+    assert select_choice.kind is ActionKind.CLICK
+    assert select_choice.candidate_id == option.id
+
+
+def test_native_select_uses_exact_verified_value() -> None:
+    native = ElementCandidate(
+        id="C001",
+        tag="select",
+        role="combobox",
+        name="Country",
+        required=True,
+        interaction="input",
+        locator=Locator(
+            selector="#country",
+            adaptive_id="candidate-country:0",
+        ),
+    )
+
+    choice = deterministic_required_choice(
+        text_excerpt="Application",
+        candidates=(native,),
+        facts=(fact("country", "Ireland", VerificationState.VERIFIED),),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert choice is not None
+    assert choice.kind is ActionKind.FILL
+    assert choice.value == "Ireland"
+
+
+def test_legally_authorized_combobox_is_consequential() -> None:
+    authorization = ElementCandidate(
+        id="C001",
+        tag="input",
+        role="combobox",
+        name="Are you legally authorized to work in Ireland? *",
+        input_type="text",
+        required=True,
+        interaction="input",
+        locator=Locator(
+            selector="#work-authorization",
+            adaptive_id="candidate-work-authorization:0",
+        ),
+    )
+
+    choice = deterministic_required_choice(
+        text_excerpt="Application",
+        candidates=(authorization,),
+        facts=(
+            fact(
+                "are_you_legally_authorized_to_work_in_ireland",
+                "Yes",
+                VerificationState.VERIFIED,
+            ),
+        ),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert choice is not None
+    assert choice.kind is ActionKind.PRESS
+    assert choice.key == "ArrowDown"
+
+
+def test_verified_combobox_fact_never_guesses_an_unobserved_option() -> None:
+    combobox = ElementCandidate(
+        id="C001",
+        tag="input",
+        role="combobox",
+        name="Data Privacy & Protection *",
+        input_type="text",
+        required=True,
+        expanded=True,
+        interaction="input",
+        locator=Locator(
+            selector="#privacy",
+            adaptive_id="candidate-privacy:0",
+        ),
+    )
+
+    choice = deterministic_required_choice(
+        text_excerpt="Application",
+        candidates=(combobox,),
+        facts=(
+            fact(
+                "data_privacy_protection",
+                "Acknowledge & Confirm",
+                VerificationState.VERIFIED,
+            ),
+        ),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert choice is not None
+    assert choice.kind is ActionKind.HANDOFF
+    assert "found 0" in choice.description

@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -20,9 +20,13 @@ class Settings(BaseSettings):
         "http://localhost:8000",
     )
     allowed_upload_roots: Annotated[tuple[Path, ...], NoDecode] = ()
-    provider: str = "deterministic"
+    allowed_upload_origins: Annotated[tuple[str, ...], NoDecode] = ()
+    provider: str = "auto"
     openai_model: str = "gpt-5.6"
     grok_model: str = "grok-4.5"
+    mission_max_parallel_research: int = Field(default=4, ge=1, le=8)
+    default_profile_id: UUID | None = None
+    default_document_path: Path | None = None
     browser_executable: str | None = None
     browser_headless: bool = True
     browser_sandbox: bool = True
@@ -44,6 +48,15 @@ class Settings(BaseSettings):
     def parse_upload_roots(cls, value):
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+    @field_validator("allowed_upload_origins", mode="before")
+    @classmethod
+    def parse_upload_origins(cls, value):
+        if isinstance(value, str):
+            return tuple(
+                item.strip().rstrip("/") for item in value.split(",") if item.strip()
+            )
         return value
 
 

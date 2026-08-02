@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Crash-safe commit control for browser automation.">
+  <meta name="description" content="Multi-search browser missions with durable proof.">
   <title>Effect Browser</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
@@ -11,16 +11,16 @@
   <div class="grain" aria-hidden="true"></div>
   <header class="topbar">
     <a class="brand" href="/">Effect Browser <span>CONTROL PLANE</span></a>
-    <nav><a href="/demo-shop" target="_blank">Order demo</a><a href="/demo-jobs" target="_blank">Job harness</a><a href="/docs">API</a></nav>
+    <nav><a href="/demo-shop" target="_blank">Order demo</a><a href="/demo-jobs" target="_blank">Job harness</a><a href="/demo-capabilities" target="_blank">Capability lab</a><a href="/docs">API</a></nav>
   </header>
   <main>
     <section class="hero">
       <div>
-        <p class="kicker">DURABLE BROWSER EFFECTS / V0.1</p>
-        <h1>The model may click.<br><em>The ledger decides.</em></h1>
-        <p class="intro">A stronger model still cannot know whether a remote submit
-          committed before its process died. Effect Browser records the boundary,
-          refuses a blind retry, and reconciles the receipt.</p>
+        <p class="kicker">ONE QUERY / PARALLEL RESEARCH / DURABLE EFFECTS / V0.4.1</p>
+        <h1>Say the outcome.<br><em>Trace every claim.</em></h1>
+        <p class="intro">Effect Browser turns a compound request into a persisted
+          dependency graph, runs independent cited searches concurrently, and routes
+          any real browser effect through the crash-safe receipt boundary.</p>
       </div>
       <div class="proof"><span id="audit-light"></span><strong id="audit-state">Checking ledger</strong><small id="audit-detail">Tamper-evident SHA-256 chain</small></div>
     </section>
@@ -28,15 +28,34 @@
     <section class="grid">
       <aside class="rail panel">
         <div class="panel-head"><div><p class="kicker">TASK QUEUE</p><h2>Operations</h2></div><button class="icon" id="refresh" aria-label="Refresh">&#8635;</button></div>
-        <form id="create-form">
-          <label>Instruction<textarea id="instruction" rows="4" required>Order three encrypted backup drives without a duplicate order.</textarea></label>
-          <label>Start URL<input id="start-url" value="http://127.0.0.1:8000" required></label>
-          <label>Planner<select id="provider"><option value="deterministic">Order demo</option><option value="job-harness">Dynamic job harness</option><option value="openai-reactive">OpenAI reactive</option><option value="grok-reactive">Grok reactive</option><option value="openai">OpenAI one-shot (legacy)</option><option value="grok">Grok one-shot (legacy)</option></select></label>
-          <label>Verified profile ID<input id="profile-id" placeholder="Required for personal facts"></label>
-          <label>Approved document path<input id="document-path" placeholder="Absolute local path"></label>
-          <label>Document SHA-256<input id="document-sha256" placeholder="64 lowercase hex characters"></label>
-          <button class="primary" type="submit">Create durable task</button>
+        <form id="autopilot-form" class="autopilot-form">
+          <label>What should the mission accomplish?
+            <textarea id="autopilot-query" rows="5" required
+              placeholder="Apply to the role at https://… using &quot;C:\approved\resume.pdf&quot;">Order three encrypted backup drives at http://127.0.0.1:8000 without a duplicate order.</textarea>
+          </label>
+          <label class="checkbox"><input id="mission-allow-external-commit"
+            type="checkbox"> Grant at most one reviewed external commit</label>
+          <button class="primary" type="submit">Plan and run mission</button>
+          <p class="contract">Independent research can run in parallel. The original
+            query and this explicit grant are both required for any commit.
+            Decomposition cannot invent authority or extra submissions.</p>
         </form>
+        <details class="advanced">
+          <summary>Advanced task controls</summary>
+          <form id="create-form">
+            <label>Instruction<textarea id="instruction" rows="4" required>Order three encrypted backup drives without a duplicate order.</textarea></label>
+            <label>Start URL<input id="start-url" value="http://127.0.0.1:8000" required></label>
+            <label>Planner<select id="provider"><option value="deterministic">Order demo</option><option value="job-harness">Dynamic job harness</option><option value="openai-reactive">OpenAI reactive</option><option value="grok-reactive">Grok reactive</option><option value="openai">OpenAI one-shot (legacy)</option><option value="grok">Grok one-shot (legacy)</option></select></label>
+            <label>Verified profile ID<input id="profile-id" placeholder="Required for personal facts"></label>
+            <label>Approved document path<input id="document-path" placeholder="Absolute local path"></label>
+            <label>Document SHA-256<input id="document-sha256" placeholder="64 lowercase hex characters"></label>
+            <label>Execution mode<select id="autonomy-mode"><option value="supervised">Supervised commits</option><option value="bounded">Bounded unattended</option></select></label>
+            <label class="checkbox"><input id="allow-file-uploads" type="checkbox"> Pre-authorize the exact document hash</label>
+            <label class="checkbox"><input id="allow-external-commits" type="checkbox"> Pre-authorize reviewed, reconcilable commits</label>
+            <label>Maximum external commits<input id="max-external-commits" type="number" min="0" max="3" value="0"></label>
+            <button class="secondary" type="submit">Create advanced task</button>
+          </form>
+        </details>
         <div class="divider"></div>
         <section class="profile-editor">
           <div class="panel-head"><div><p class="kicker">FACTUAL PROFILE</p><h2>Verified answers</h2></div></div>
@@ -61,12 +80,20 @@
       </aside>
 
       <section class="workspace panel">
+        <div id="mission-view" hidden>
+          <div class="panel-head task-heading"><div><p class="kicker" id="mission-id"></p><h2 id="mission-title"></h2></div><span class="status" id="mission-status"></span></div>
+          <p id="mission-message" class="intro"></p>
+          <div class="commandbar"><button class="primary" id="run-mission">Run / resume mission</button><span>Completed searches are retained; paused browser children resume by durable task ID.</span></div>
+          <div class="section-head"><p class="kicker">MISSION DAG</p><span id="mission-count"></span></div>
+          <div id="mission-steps" class="timeline"></div>
+          <section id="mission-answer" class="mission-answer" hidden></section>
+        </div>
         <div id="empty-state" class="empty-state">
           <div class="seal">EB</div><h2>No operation selected</h2><p>Create a task to inspect every prepared action, approval binding, receipt, and recovery decision.</p>
         </div>
         <div id="task-view" hidden>
           <div class="panel-head task-heading"><div><p class="kicker" id="task-id"></p><h2 id="task-title"></h2></div><span class="status" id="task-status"></span></div>
-          <div class="commandbar"><button class="primary" id="run-task">Run / resume</button><span id="run-note">Safe actions run until a hard gate.</span></div>
+          <div class="commandbar"><button class="primary" id="run-task">Run / resume</button><span id="run-note">Safe actions run automatically; commits stay inside the task's recorded authority.</span></div>
           <section id="gate"></section>
           <div class="section-head"><p class="kicker">DURABLE JOURNAL</p><span id="action-count"></span></div>
           <div id="actions" class="timeline"></div>

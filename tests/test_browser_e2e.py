@@ -9,26 +9,59 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
+from playwright.sync_api import sync_playwright
 
 from effect_browser import api
+from effect_browser.autopilot import AutopilotResult, AutopilotVerdict
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.config import get_settings
 from effect_browser.domain import (
     ActionKind,
     ActionState,
+    MissionPlan,
+    MissionPlanStep,
+    MissionStepKind,
+    MissionVerdict,
     ProposedAction,
     TaskStatus,
 )
 from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
+from effect_browser.mission import (
+    MissionCoordinator,
+    MissionResult,
+    ResearchEvidence,
+    SynthesisEvidence,
+)
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers import DeterministicPlanner
 from effect_browser.uploads import sha256_file
 
 
 def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    # Chromium refuses a legacy blocklist of ports even on loopback. Letting the
+    # OS occasionally select one made otherwise deterministic E2E tests flaky.
+    unsafe = {
+        2049,
+        3659,
+        4045,
+        5060,
+        5061,
+        6000,
+        6566,
+        6665,
+        6666,
+        6667,
+        6668,
+        6669,
+        6697,
+        10080,
+    }
+    while True:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if port not in unsafe:
+            return port
 
 
 def edge_executable() -> str | None:
@@ -249,5 +282,298 @@ def test_real_browser_crash_reconciles_one_order(tmp_path: Path, monkeypatch) ->
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_one_query_autopilot_proves_real_browser_completion(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'autopilot-e2e.db'}",
+    )
+    monkeypatch.setenv("EFFECT_BROWSER_ALLOWED_ORIGINS", base_url)
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_ARTIFACTS_DIRECTORY",
+        str(tmp_path / "artifacts"),
+    )
+    if executable := edge_executable():
+        monkeypatch.setenv("EFFECT_BROWSER_BROWSER_EXECUTABLE", executable)
+    get_settings.cache_clear()
+    api.get_store.cache_clear()
+    server = uvicorn.Server(
+        uvicorn.Config(api.app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_until_ready(base_url)
+
+    try:
+        response = httpx.post(
+            f"{base_url}/v1/autopilot",
+            json={
+                "query": (
+                    "Order three encrypted backup drives at "
+                    f"{base_url} without a duplicate order."
+                ),
+                "allow_external_commit": True,
+            },
+            timeout=90,
+        )
+        assert response.status_code == 200
+        result = AutopilotResult.model_validate(response.json())
+        submit_evidence = [
+            item for item in result.evidence if item.kind is ActionKind.SUBMIT
+        ]
+        orders = httpx.get(f"{base_url}/demo-shop/api/orders", timeout=5).json()
+        matching = [
+            row
+            for row in orders
+            if submit_evidence and row["reference"] == submit_evidence[0].effect_key
+        ]
+
+        assert result.verdict is AutopilotVerdict.VERIFIED_SUCCESS
+        assert result.task.status is TaskStatus.SUCCEEDED
+        assert len(submit_evidence) == 1
+        assert len(matching) == 1
+        assert matching[0]["duplicate_attempts"] == 0
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_multi_search_mission_gates_one_real_browser_commit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'mission-browser-e2e.db'}",
+    )
+    monkeypatch.setenv("EFFECT_BROWSER_ALLOWED_ORIGINS", base_url)
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_ARTIFACTS_DIRECTORY",
+        str(tmp_path / "artifacts"),
+    )
+    if executable := edge_executable():
+        monkeypatch.setenv("EFFECT_BROWSER_BROWSER_EXECUTABLE", executable)
+    get_settings.cache_clear()
+    api.get_store.cache_clear()
+
+    class Planner:
+        name = "deterministic"
+
+        def plan(self, query, *, external_commit_authorized):
+            assert external_commit_authorized is True
+            return MissionPlan(
+                summary="Check two independent facts before one browser commit.",
+                steps=(
+                    MissionPlanStep(
+                        key="catalog",
+                        kind=MissionStepKind.RESEARCH,
+                        instruction="Inspect the demo catalog.",
+                    ),
+                    MissionPlanStep(
+                        key="existing_orders",
+                        kind=MissionStepKind.RESEARCH,
+                        instruction="Inspect existing demo orders.",
+                    ),
+                    MissionPlanStep(
+                        key="order",
+                        kind=MissionStepKind.BROWSER,
+                        instruction="Create the requested order exactly once.",
+                        depends_on=("catalog", "existing_orders"),
+                    ),
+                ),
+            )
+
+    class Researcher:
+        def search(self, query):
+            suffix = "demo-shop" if "catalog" in query else "demo-shop/api/orders"
+            return ResearchEvidence(
+                query=query,
+                summary=f"Captured read-only evidence for {query}",
+                citation_urls=(f"{base_url}/{suffix}",),
+                provider_response_sha256="d" * 64,
+            )
+
+    def mission_coordinator() -> MissionCoordinator:
+        settings = get_settings()
+        service = api.get_service()
+        return MissionCoordinator(
+            store=service.store,
+            autopilot=api.get_autopilot(),
+            settings=settings,
+            plan_provider=Planner(),
+            researcher=Researcher(),
+            max_parallel_research=2,
+        )
+
+    api.app.dependency_overrides[api.get_mission_coordinator] = mission_coordinator
+    server = uvicorn.Server(
+        uvicorn.Config(api.app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_until_ready(base_url)
+
+    try:
+        response = httpx.post(
+            f"{base_url}/v1/missions",
+            json={
+                "query": (
+                    "Order three encrypted backup drives at "
+                    f"{base_url} without a duplicate order."
+                ),
+                "allow_external_commit": True,
+            },
+            timeout=90,
+        )
+        assert response.status_code == 200
+        result = MissionResult.model_validate(response.json())
+        browser_step = next(
+            step for step in result.steps if step.kind is MissionStepKind.BROWSER
+        )
+        child = api.get_store().get_task(
+            result.mission.tenant_id,
+            browser_step.child_task_id,
+        )
+        orders = httpx.get(f"{base_url}/demo-shop/api/orders", timeout=5).json()
+
+        assert result.verdict is MissionVerdict.VERIFIED_EFFECT
+        assert [step.status.value for step in result.steps] == [
+            "succeeded",
+            "succeeded",
+            "succeeded",
+        ]
+        assert child.status is TaskStatus.SUCCEEDED
+        assert len(orders) == 1
+        assert orders[0]["duplicate_attempts"] == 0
+        assert api.get_store().verify_audit(result.mission.tenant_id).valid is True
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.app.dependency_overrides.pop(api.get_mission_coordinator, None)
+        api.get_store.cache_clear()
+        get_settings.cache_clear()
+
+
+@pytest.mark.e2e
+def test_dashboard_renders_multi_search_dag_and_cited_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    port = free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    monkeypatch.setenv(
+        "EFFECT_BROWSER_DATABASE_URL",
+        f"sqlite:///{tmp_path / 'mission-dashboard-e2e.db'}",
+    )
+    get_settings.cache_clear()
+    api.get_store.cache_clear()
+
+    class Planner:
+        name = "deterministic"
+
+        def plan(self, query, *, external_commit_authorized):
+            assert external_commit_authorized is False
+            return MissionPlan(
+                summary="Compare two independent evidence streams.",
+                steps=(
+                    MissionPlanStep(
+                        key="source_a",
+                        kind=MissionStepKind.RESEARCH,
+                        instruction="Research source A.",
+                    ),
+                    MissionPlanStep(
+                        key="source_b",
+                        kind=MissionStepKind.RESEARCH,
+                        instruction="Research source B.",
+                    ),
+                    MissionPlanStep(
+                        key="comparison",
+                        kind=MissionStepKind.SYNTHESIS,
+                        instruction="Compare both cited sources.",
+                        depends_on=("source_a", "source_b"),
+                    ),
+                ),
+            )
+
+    class Researcher:
+        def search(self, query):
+            slug = "a" if query.endswith("A.") else "b"
+            return ResearchEvidence(
+                query=query,
+                summary=f"Evidence {slug.upper()}",
+                citation_urls=(f"https://evidence.example/{slug}",),
+                provider_response_sha256=slug * 64,
+            )
+
+    class Synthesizer:
+        def synthesize(self, instruction, dependency_outputs):
+            return SynthesisEvidence(
+                answer="A and B were compared from two persisted citations.",
+                citation_urls=tuple(
+                    url
+                    for output in dependency_outputs
+                    for url in output["citation_urls"]
+                ),
+                input_sha256="e" * 64,
+            )
+
+    def mission_coordinator() -> MissionCoordinator:
+        settings = get_settings()
+        service = api.get_service()
+        return MissionCoordinator(
+            store=service.store,
+            autopilot=api.get_autopilot(),
+            settings=settings,
+            plan_provider=Planner(),
+            researcher=Researcher(),
+            synthesizer=Synthesizer(),
+            max_parallel_research=2,
+        )
+
+    api.app.dependency_overrides[api.get_mission_coordinator] = mission_coordinator
+    server = uvicorn.Server(
+        uvicorn.Config(api.app, host="127.0.0.1", port=port, log_level="warning")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    wait_until_ready(base_url)
+
+    try:
+        with sync_playwright() as playwright:
+            launch_args = {"headless": True}
+            if executable := edge_executable():
+                launch_args["executable_path"] = executable
+            browser = playwright.chromium.launch(**launch_args)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.goto(base_url, wait_until="networkidle")
+            page.locator("#autopilot-query").fill(
+                "Research source A and source B, then compare the evidence."
+            )
+            page.get_by_role("button", name="Plan and run mission").click()
+            page.locator("#mission-view").wait_for(state="visible")
+
+            assert page.locator("#mission-status").inner_text().casefold() == "completed"
+            assert page.locator("#mission-steps .mission-step").count() == 3
+            assert "A and B were compared" in page.locator("#mission-answer").inner_text()
+            assert page.locator("#mission-answer .source-link").count() == 2
+            browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        api.app.dependency_overrides.pop(api.get_mission_coordinator, None)
         api.get_store.cache_clear()
         get_settings.cache_clear()

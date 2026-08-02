@@ -142,6 +142,11 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
 
     assert "payload_sha256" in columns
     assert {"resume_filename", "resume_sha256"} <= job_columns
-    assert {"profile_id", "document_path", "document_sha256"} <= task_columns
+    assert {
+        "profile_id",
+        "document_path",
+        "document_sha256",
+        "autonomy_scope",
+    } <= task_columns
     assert proposal.outgoing_review is not None
     assert payload_sha256 == proposal.outgoing_review.payload_sha256

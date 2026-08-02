@@ -158,6 +158,9 @@ def create_demo_job_router(store_provider: Callable[[], DatabaseStore]) -> APIRo
             payload.set('job_slug', '{JOB_SLUG}');
             payload.set('mode', mode);
             if (clientNonce) payload.set('client_nonce', clientNonce);
+            if (mode === 'delayed_submit') {{
+              await new Promise(resolve => setTimeout(resolve, 750));
+            }}
             const submitted = await fetch('/demo-jobs/api/applications', {{
               method: 'POST',
               body: payload

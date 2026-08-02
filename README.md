@@ -1,17 +1,69 @@
 # Effect Browser
 
-Effect Browser is a crash-safe control plane for AI-driven browser operations. It is
+Effect Browser is a one-query, crash-safe control plane for multi-search research and
+AI-driven browser operations. It is
 not another “click things with an LLM” wrapper. It focuses on the failure ordinary
 browser agents handle badly: the target may commit an external action just before the
 browser or worker crashes.
 
 Models propose typed actions. Effect Browser persists them, auto-runs safe navigation,
-requires exact action-bound approval for external commits, and records `OUTCOME_UNKNOWN`
-instead of blindly clicking twice. A deterministic reconciler can close the gap when the
-target exposes a stable business reference or receipt.
+requires exact action-bound authority for external commits, and records
+`OUTCOME_UNKNOWN` instead of blindly clicking twice. Authority can come from an
+operator at the commit boundary or from a bounded scope recorded when the task is
+created. A deterministic reconciler can close the gap when the target exposes a stable
+business reference or receipt.
 
 Read the [research decision](docs/RESEARCH.md) and [technical spec](docs/SPEC.md).
 Deployment and recovery procedures are in the [operations runbook](docs/OPERATIONS.md).
+The exact one-query capability and its hard limits are in
+[the autopilot contract](docs/AUTOPILOT.md). Compound-query decomposition,
+parallel-search, and parent-authority semantics are in
+[the mission contract](docs/MISSIONS.md).
+
+## One-query mission mode
+
+Configure `OPENAI_API_KEY` or `XAI_API_KEY`, then give the normal path only a query:
+
+```powershell
+effect-browser do "Research official pricing, reliability, and limits, then compare them."
+```
+
+The provider creates a strict graph of at most eight persisted research, synthesis,
+and browser steps. Independent research searches run concurrently and must return
+provider tool evidence plus source URLs. Completed outputs are hashed and retained
+across worker restarts.
+
+External effects require two independent keys: the query must name an effect such as
+`apply`, `book`, `order`, or `submit`, and the caller must explicitly pass `--commit`
+(or `allow_external_commit: true` over HTTP/MCP). Language alone can never grant write
+authority. The whole mission then gets at most one committing browser child and one
+reviewed commit. Decomposition cannot multiply that authority.
+
+```powershell
+effect-browser do "Order three drives at https://shop.example.test" --commit
+```
+
+The command exits successfully only for `completed` or `verified_effect`; a model
+saying it finished is insufficient.
+
+Planner-authored browser-step text is not passed back as user authority and cannot
+inject a target URL. Mission-owned child tasks are executable only through their
+parent mission, whose lease is heartbeated during long browser work.
+
+The low-level `POST /v1/autopilot` surface still runs exactly one browser task. If that
+task has no URL, the selected provider must use hosted web search to ground a start
+page.
+
+Read-only browser navigation ends as `unverified` unless it produces deterministic,
+goal-specific rendered evidence. A `finish` expectation must be an exact phrase from the
+original user instruction and must appear in the final rendered snapshot. The receipt keeps
+only the URL, state hash, and expected-phrase hash; arbitrary page text is not persisted. A
+final page hash by itself is evidence for inspection, not proof that the model interpreted the
+user's goal correctly.
+
+This is not a promise to complete every website. CAPTCHA/MFA, credentials, payments,
+missing verified facts, unsupported multi-write flows, and unprovable outcomes return
+a truthful pause or failure verdict.
 
 ## Honest guarantee
 
@@ -21,8 +73,10 @@ is impossible without cooperation or uniquely queryable target state.
 - With a target idempotency key or deterministic receipt lookup: one observable effect.
 - Without one: at-most-one dispatch, then explicit manual resolution if the outcome is
   ambiguous.
-- After page drift: approval is invalid and must be reviewed again.
-- Generic clicks are rejected because the policy cannot prove whether they are read-only.
+- After page drift: the old authorization is invalid. Bounded mode re-observes,
+  re-previews, and re-binds it at most three times; supervised mode pauses.
+- Ambiguous generic clicks never consume bounded authority because their effect cannot
+  be reviewed or reconciled.
 - Form fills are safe only for validated workflows that do not auto-save on change.
 
 ## Quick start
@@ -45,6 +99,15 @@ authoritative application ledger, and a deliberately deceptive fake-success mode
 
 ```powershell
 pytest tests/test_job_harness_e2e.py
+```
+
+The domain-neutral dynamic capability lab is at
+<http://127.0.0.1:8000/demo-capabilities>. Its real Edge test proves checkbox/radio
+state, select keyboard input, scrolling, bounded waits, downloads with SHA-256
+receipts, and Scrapling relocation after the page replaces the observed controls:
+
+```powershell
+pytest tests/test_capability_harness_e2e.py
 ```
 
 The honest test result is documented in
@@ -70,11 +133,13 @@ Local file inputs are disabled unless `EFFECT_BROWSER_ALLOWED_UPLOAD_ROOTS` name
 more directories. Every upload action binds an absolute path and the raw-byte SHA-256;
 policy checks the allowlist and content, and the browser executor checks both again
 immediately before attaching the file. Snapshots expose only whether a file is selected,
-never its local path or filename. Every file selection requires an action-bound operator
-approval. The browser installs a write-blocking route before selecting the file; an ATS
-that tries to auto-upload on `change` is blocked before the server receives it. For an
-approved final submit, the exact guard is installed before the file input is replayed
-after a browser restart.
+never its local path or filename. Every file selection requires action-bound authority:
+an operator decision or a bounded task scope that names the exact task document hash.
+The browser installs a route before selecting the file. A file-change POST is permitted
+only when `EFFECT_BROWSER_ALLOWED_UPLOAD_ORIGINS` explicitly names its origin and the
+multipart body contains exactly the approved document SHA-256. Every other write is
+blocked before transmission. For an authorized final submit, the exact guard is
+installed before the file input is replayed after a browser restart.
 
 The dashboard's `job-harness` provider is deliberately synthetic. Put a non-personal
 fixture named `synthetic-resume.txt` in one configured upload root; task creation fails
@@ -101,15 +166,23 @@ fingerprint, the action, and the page state. On dispatch, a changed first reques
 blocked before transmission. The current exact preview supports one JSON, URL-encoded,
 or multipart request up to 12 MiB. Multipart comparison ignores only the regenerated
 boundary; filename, MIME type, size, document bytes, field order, and values remain
-bound. Streaming and multi-write submit flows fail closed.
+bound. Known reCAPTCHA token endpoints may run while the application request remains
+blocked/reviewed; volatile anti-abuse token values are presence-bound so token refresh
+does not invalidate unchanged applicant data. The route remains armed for delayed
+JavaScript submits. Streaming and multi-write application flows fail closed.
 
 Scrapling's role and limitations are recorded in
 [docs/SCRAPLING_RESEARCH.md](docs/SCRAPLING_RESEARCH.md). The measurable completion
 contract is [docs/AUTONOMOUS_ROADMAP.md](docs/AUTONOMOUS_ROADMAP.md).
+The unattended authority contract is
+[docs/BOUNDED_AUTONOMY.md](docs/BOUNDED_AUTONOMY.md).
+The ten-scenario hostile browser campaign and its remaining limitations are in
+[docs/ADVERSARIAL_BROWSER_MATRIX.md](docs/ADVERSARIAL_BROWSER_MATRIX.md).
 
 Run the durable polling worker separately when tasks should progress without an open
-dashboard. It auto-runs only queued safe work and still stops at approval and recovery
-gates:
+dashboard. Supervised tasks stop at commit approval. Bounded tasks automatically
+consume their recorded upload/commit authority, but still stop at unknown outcomes,
+missing facts, challenges, ambiguous clicks, or an exhausted commit limit:
 
 ```powershell
 effect-browser worker
@@ -121,15 +194,15 @@ effect-browser killer-demo
 
 ## Providers
 
-The default deterministic planner drives the demo and tests. OpenAI and Grok implement
-the same JSON plan contract:
+The deterministic planner drives the demo and tests. One-query public-web runs select
+an available reactive provider automatically, or you can pin one:
 
 ```powershell
 $env:OPENAI_API_KEY = "..."
-$env:EFFECT_BROWSER_PROVIDER = "openai"
+$env:EFFECT_BROWSER_PROVIDER = "openai-reactive"
 
 $env:XAI_API_KEY = "..."
-$env:EFFECT_BROWSER_PROVIDER = "grok"
+$env:EFFECT_BROWSER_PROVIDER = "grok-reactive"
 ```
 
 Provider output never directly invokes Playwright. It is validated, stored, classified

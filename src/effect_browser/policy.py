@@ -24,6 +24,22 @@ SENSITIVE_LABELS = {
     "secret",
     "cvv",
 }
+SAFE_PRESS_KEYS = {
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "arrowup",
+    "backspace",
+    "delete",
+    "end",
+    "escape",
+    "home",
+    "pagedown",
+    "pageup",
+    "shift+tab",
+    "space",
+    "tab",
+}
 
 
 class ActionPolicy:
@@ -35,9 +51,14 @@ class ActionPolicy:
         self.allowed_origins = {item.rstrip("/") for item in allowed_origins}
         self.upload_guard = UploadGuard(allowed_upload_roots)
 
-    def evaluate(self, action: ProposedAction, current_url: str) -> PolicyDecision:
+    def evaluate(
+        self,
+        action: ProposedAction,
+        current_url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> PolicyDecision:
         target_url = action.url or current_url
-        if target_url and not self._origin_allowed(target_url):
+        if target_url and not self._origin_allowed(target_url, extra_allowed_origins):
             return PolicyDecision(
                 allowed=False,
                 risk=RiskClass.READ,
@@ -66,6 +87,44 @@ class ActionPolicy:
                 risk=RiskClass.INPUT,
                 requires_approval=False,
                 reason="non-sensitive form preparation is reversible",
+            )
+        if action.kind is ActionKind.CHECK:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.INPUT,
+                requires_approval=False,
+                reason="checkbox and radio preparation is reversible",
+            )
+        if action.kind is ActionKind.PRESS:
+            if (action.key or "").casefold() not in SAFE_PRESS_KEYS:
+                return PolicyDecision(
+                    allowed=False,
+                    risk=RiskClass.EXTERNAL_COMMIT,
+                    requires_approval=False,
+                    reason=(
+                        "key is not in the non-commit keyboard allowlist; use "
+                        "fill or an exact reviewed submit action"
+                    ),
+                )
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.INPUT,
+                requires_approval=False,
+                reason="non-commit keyboard interaction is reversible",
+            )
+        if action.kind in {ActionKind.SCROLL, ActionKind.WAIT}:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.READ,
+                requires_approval=False,
+                reason="viewport movement and bounded waiting are read-only",
+            )
+        if action.kind is ActionKind.DOWNLOAD:
+            return PolicyDecision(
+                allowed=True,
+                risk=RiskClass.READ,
+                requires_approval=False,
+                reason="download is an inbound transfer from an allowlisted origin",
             )
         if action.kind is ActionKind.UPLOAD:
             try:
@@ -96,6 +155,16 @@ class ActionPolicy:
                     risk=RiskClass.READ,
                     requires_approval=False,
                     reason="candidate-bound link navigation is read-only",
+                )
+            if action.target_interaction == "option":
+                return PolicyDecision(
+                    allowed=True,
+                    risk=RiskClass.INPUT,
+                    requires_approval=False,
+                    reason=(
+                        "selecting an observed listbox option is reversible "
+                        "form preparation"
+                    ),
                 )
             if action.target_interaction == "ambiguous":
                 return PolicyDecision(
@@ -136,7 +205,7 @@ class ActionPolicy:
                     reason="outgoing payload review is not bound to the planned page",
                 )
             request = action.outgoing_review.requests[0]
-            if not self._origin_allowed(request.target):
+            if not self._origin_allowed(request.target, extra_allowed_origins):
                 return PolicyDecision(
                     allowed=False,
                     risk=RiskClass.EXTERNAL_COMMIT,
@@ -159,12 +228,23 @@ class ActionPolicy:
             reason="read or local navigation action",
         )
 
-    def _origin_allowed(self, url: str) -> bool:
-        return self._origin(url) in self.allowed_origins
+    def _origin_allowed(
+        self,
+        url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> bool:
+        allowed = self.allowed_origins | {
+            self._origin(item) for item in extra_allowed_origins
+        }
+        return self._origin(url) in allowed
 
-    def allows_url(self, url: str) -> bool:
+    def allows_url(
+        self,
+        url: str,
+        extra_allowed_origins: tuple[str, ...] = (),
+    ) -> bool:
         """Return whether browser egress to this URL is within the configured policy."""
-        return self._origin_allowed(url)
+        return self._origin_allowed(url, extra_allowed_origins)
 
     @staticmethod
     def _origin(url: str) -> str:

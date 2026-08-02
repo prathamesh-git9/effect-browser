@@ -39,9 +39,84 @@ class TaskStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class MissionStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class MissionStepKind(StrEnum):
+    RESEARCH = "research"
+    BROWSER = "browser"
+    SYNTHESIS = "synthesis"
+
+
+class MissionStepStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+# The scheduler may cap active threads, but accepting an arbitrarily broad graph
+# would still persist unbounded ready work and make replay behavior configuration-
+# dependent.  The plan itself therefore carries a small, deterministic width bound.
+MAX_MISSION_READY_WIDTH = 4
+
+
+class MissionVerdict(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    VERIFIED_EFFECT = "verified_effect"
+    NEEDS_INPUT = "needs_input"
+    NEEDS_AUTHORITY = "needs_authority"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class AutonomyMode(StrEnum):
+    SUPERVISED = "supervised"
+    BOUNDED = "bounded"
+
+
+class AutonomyScope(DomainModel):
+    """Task-level authority granted before unattended execution starts."""
+
+    mode: AutonomyMode = AutonomyMode.SUPERVISED
+    allow_query_target_origin: bool = False
+    allow_file_uploads: bool = False
+    allow_external_commits: bool = False
+    max_external_commits: int = Field(default=0, ge=0, le=3)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> AutonomyScope:
+        if self.mode is AutonomyMode.SUPERVISED and (
+            self.allow_query_target_origin
+            or self.allow_file_uploads
+            or self.allow_external_commits
+            or self.max_external_commits
+        ):
+            raise ValueError("supervised mode cannot grant unattended authority")
+        if self.allow_external_commits != (self.max_external_commits > 0):
+            raise ValueError(
+                "allow_external_commits requires max_external_commits from one to three"
+            )
+        return self
+
+
 class ActionKind(StrEnum):
     NAVIGATE = "navigate"
     FILL = "fill"
+    CHECK = "check"
+    PRESS = "press"
+    SCROLL = "scroll"
+    WAIT = "wait"
+    DOWNLOAD = "download"
     UPLOAD = "upload"
     CLICK = "click"
     SUBMIT = "submit"
@@ -60,6 +135,7 @@ class ActionState(StrEnum):
     OUTCOME_UNKNOWN = "outcome_unknown"
     REJECTED = "rejected"
     INVALIDATED = "invalidated"
+    SUPERSEDED = "superseded"
 
 
 class RiskClass(StrEnum):
@@ -131,6 +207,10 @@ class Locator(DomainModel):
         default=None,
         description="Scrapling relocation key associated with a selector strategy.",
     )
+    frame_path: tuple[str, ...] = Field(
+        default=(),
+        description="Exact iframe selectors from the top page to the target frame.",
+    )
 
     @model_validator(mode="after")
     def exactly_one_strategy(self) -> Locator:
@@ -145,6 +225,8 @@ class Locator(DomainModel):
             raise ValueError("accessible name is valid only with a role locator")
         if self.adaptive_id and not self.selector:
             raise ValueError("adaptive_id requires a selector locator")
+        if any(not selector.strip() for selector in self.frame_path):
+            raise ValueError("frame_path selectors cannot be blank")
         return self
 
 
@@ -192,6 +274,10 @@ class ReviewedRequest(DomainModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    security_headers_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     fields: tuple[ReviewedRequestField, ...] = ()
     document_sha256s: tuple[str, ...] = ()
     request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -205,6 +291,11 @@ class ReviewedRequest(DomainModel):
             "body_sha256": self.body_sha256,
             "fields": [field.model_dump(mode="json") for field in self.fields],
             "document_sha256s": list(self.document_sha256s),
+            **(
+                {"security_headers_sha256": self.security_headers_sha256}
+                if self.security_headers_sha256 is not None
+                else {}
+            ),
         }
 
     @model_validator(mode="after")
@@ -250,15 +341,11 @@ class OutgoingReview(DomainModel):
             for request in requests
             for document_sha256 in request.document_sha256s
         )
-        if (
-            self.document_sha256s
-            and captured_documents
-            and self.document_sha256s != captured_documents
-        ):
+        if self.document_sha256s and self.document_sha256s != captured_documents:
             raise ValueError(
                 "captured outgoing document bytes do not match the reviewed upload"
             )
-        document_sha256s = captured_documents or self.document_sha256s
+        document_sha256s = captured_documents
         body: dict[str, Any] = {
             "fields": [field.model_dump(mode="json") for field in self.fields],
             "document_sha256s": list(document_sha256s),
@@ -279,6 +366,10 @@ class ProposedAction(DomainModel):
     locator: Locator | None = None
     url: str | None = None
     value: str | None = None
+    checked: bool | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=50)
+    scroll_y: int | None = Field(default=None, ge=-5_000, le=5_000)
+    wait_ms: int | None = Field(default=None, ge=100, le=5_000)
     file_path: Path | None = None
     document_sha256: str | None = Field(
         default=None,
@@ -299,6 +390,9 @@ class ProposedAction(DomainModel):
             raise ValueError("navigate requires url")
         if self.kind in {
             ActionKind.FILL,
+            ActionKind.CHECK,
+            ActionKind.PRESS,
+            ActionKind.DOWNLOAD,
             ActionKind.UPLOAD,
             ActionKind.CLICK,
             ActionKind.SUBMIT,
@@ -307,6 +401,22 @@ class ProposedAction(DomainModel):
                 raise ValueError(f"{self.kind.value} requires locator")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill requires value")
+        if self.kind is ActionKind.CHECK and self.checked is None:
+            raise ValueError("check requires checked")
+        if self.kind is ActionKind.PRESS and self.key is None:
+            raise ValueError("press requires key")
+        if self.kind is ActionKind.SCROLL and not self.scroll_y:
+            raise ValueError("scroll requires a non-zero scroll_y")
+        if self.kind is ActionKind.WAIT and self.wait_ms is None:
+            raise ValueError("wait requires wait_ms")
+        if self.kind is not ActionKind.CHECK and self.checked is not None:
+            raise ValueError("checked is valid only for check actions")
+        if self.kind is not ActionKind.PRESS and self.key is not None:
+            raise ValueError("key is valid only for press actions")
+        if self.kind is not ActionKind.SCROLL and self.scroll_y is not None:
+            raise ValueError("scroll_y is valid only for scroll actions")
+        if self.kind is not ActionKind.WAIT and self.wait_ms is not None:
+            raise ValueError("wait_ms is valid only for wait actions")
         if self.kind is ActionKind.UPLOAD:
             if self.file_path is None or self.document_sha256 is None:
                 raise ValueError("upload requires file_path and document_sha256")
@@ -349,6 +459,7 @@ class ElementCandidate(DomainModel):
     input_type: str | None = None
     required: bool = False
     disabled: bool = False
+    expanded: bool = False
     filled: bool = False
     current_value: str | None = None
     href: str | None = None
@@ -407,6 +518,10 @@ class StepChoice(DomainModel):
     kind: ActionKind
     candidate_id: str | None = None
     value: str | None = None
+    checked: bool | None = None
+    key: str | None = Field(default=None, min_length=1, max_length=50)
+    scroll_y: int | None = Field(default=None, ge=-5_000, le=5_000)
+    wait_ms: int | None = Field(default=None, ge=100, le=5_000)
     file_path: Path | None = None
     document_sha256: str | None = Field(
         default=None,
@@ -422,6 +537,9 @@ class StepChoice(DomainModel):
             raise ValueError("navigate choice requires url")
         if self.kind in {
             ActionKind.FILL,
+            ActionKind.CHECK,
+            ActionKind.PRESS,
+            ActionKind.DOWNLOAD,
             ActionKind.UPLOAD,
             ActionKind.CLICK,
             ActionKind.SUBMIT,
@@ -430,6 +548,22 @@ class StepChoice(DomainModel):
                 raise ValueError(f"{self.kind.value} choice requires candidate_id")
         if self.kind is ActionKind.FILL and self.value is None:
             raise ValueError("fill choice requires value")
+        if self.kind is ActionKind.CHECK and self.checked is None:
+            raise ValueError("check choice requires checked")
+        if self.kind is ActionKind.PRESS and self.key is None:
+            raise ValueError("press choice requires key")
+        if self.kind is ActionKind.SCROLL and not self.scroll_y:
+            raise ValueError("scroll choice requires a non-zero scroll_y")
+        if self.kind is ActionKind.WAIT and self.wait_ms is None:
+            raise ValueError("wait choice requires wait_ms")
+        if self.kind is not ActionKind.CHECK and self.checked is not None:
+            raise ValueError("checked is valid only for check choices")
+        if self.kind is not ActionKind.PRESS and self.key is not None:
+            raise ValueError("key is valid only for press choices")
+        if self.kind is not ActionKind.SCROLL and self.scroll_y is not None:
+            raise ValueError("scroll_y is valid only for scroll choices")
+        if self.kind is not ActionKind.WAIT and self.wait_ms is not None:
+            raise ValueError("wait_ms is valid only for wait choices")
         if self.kind is ActionKind.UPLOAD:
             if self.file_path is None or self.document_sha256 is None:
                 raise ValueError("upload choice requires file_path and document_sha256")
@@ -445,6 +579,10 @@ class StepChoice(DomainModel):
             (
                 self.candidate_id,
                 self.value,
+                self.checked,
+                self.key,
+                self.scroll_y,
+                self.wait_ms,
                 self.file_path,
                 self.document_sha256,
                 self.url,
@@ -475,6 +613,11 @@ class Task(DomainModel):
     start_url: str
     provider: str
     profile_id: UUID | None = None
+    document_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    autonomy: AutonomyScope = Field(default_factory=AutonomyScope)
     status: TaskStatus
     current_ordinal: int
     created_at: datetime
@@ -482,6 +625,106 @@ class Task(DomainModel):
     version: int
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
+
+
+class MissionPlanStep(DomainModel):
+    key: str = Field(
+        min_length=1,
+        max_length=40,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    kind: MissionStepKind
+    instruction: str = Field(min_length=1, max_length=2_000)
+    depends_on: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_dependencies(self) -> MissionPlanStep:
+        if self.key in self.depends_on:
+            raise ValueError("mission step cannot depend on itself")
+        if len(set(self.depends_on)) != len(self.depends_on):
+            raise ValueError("mission step dependencies must be unique")
+        return self
+
+
+class MissionPlan(DomainModel):
+    summary: str = Field(min_length=1, max_length=500)
+    steps: tuple[MissionPlanStep, ...] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_dag(self) -> MissionPlan:
+        keys = [step.key for step in self.steps]
+        if len(set(keys)) != len(keys):
+            raise ValueError("mission step keys must be unique")
+        known: set[str] = set()
+        wave_by_key: dict[str, int] = {}
+        wave_widths: dict[int, int] = {}
+        for step in self.steps:
+            missing = set(step.depends_on) - known
+            if missing:
+                raise ValueError(
+                    "mission steps must be topologically ordered; missing "
+                    f"dependencies for {step.key}: {', '.join(sorted(missing))}"
+                )
+            wave = (
+                max(wave_by_key[key] for key in step.depends_on) + 1
+                if step.depends_on
+                else 0
+            )
+            wave_widths[wave] = wave_widths.get(wave, 0) + 1
+            if wave_widths[wave] > MAX_MISSION_READY_WIDTH:
+                raise ValueError(
+                    "mission graph ready wave exceeds the maximum width of "
+                    f"{MAX_MISSION_READY_WIDTH}"
+                )
+            known.add(step.key)
+            wave_by_key[step.key] = wave
+        return self
+
+
+class Mission(DomainModel):
+    id: UUID
+    tenant_id: UUID
+    query: str
+    provider: str
+    plan_summary: str
+    external_commit_authorized: bool
+    max_external_commits: int = Field(ge=0, le=1)
+    status: MissionStatus
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+
+
+class MissionStep(DomainModel):
+    id: UUID
+    mission_id: UUID
+    tenant_id: UUID
+    ordinal: int = Field(ge=0, le=7)
+    key: str
+    kind: MissionStepKind
+    instruction: str
+    depends_on: tuple[str, ...] = ()
+    status: MissionStepStatus
+    child_task_id: UUID | None = None
+    output: dict[str, Any] | None = None
+    output_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    version: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_output_hash(self) -> MissionStep:
+        if self.output is None and self.output_sha256 is not None:
+            raise ValueError("mission step output hash requires output")
+        if self.output is not None and digest(self.output) != self.output_sha256:
+            raise ValueError("mission step output does not match its SHA-256")
+        return self
 
 
 class FactualProfile(DomainModel):

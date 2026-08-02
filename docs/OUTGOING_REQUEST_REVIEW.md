@@ -22,12 +22,14 @@ new WebSocket connections so the supported submit path cannot bypass the review:
 3. Parse and fingerprint the one click-generated request.
 4. Abort that route with `blockedbyclient`; no target request is sent.
 5. Persist only the display-safe target, parsed fields, URL and wire-body evidence,
-   canonical body hash, raw document hashes, and request fingerprint. Token-like values
-   are redacted but their hashes remain bound.
+   canonical body hash, raw document hashes, and request fingerprint. Secrets are
+   redacted. Volatile CSRF, fingerprint, request-token, and reCAPTCHA values are
+   presence-bound rather than value-bound; ordinary applicant values remain hash-bound.
 6. Require action-time operator approval. The approval row and hash-chained audit event
    bind the action, observation, payload, and request hashes.
-7. Rebuild the browser state. At dispatch, route the first request again. Continue it
-   only if its fingerprint is identical; otherwise abort it before transmission.
+7. Rebuild the browser state. At dispatch, keep the route armed while delayed
+   JavaScript and browser-security token acquisition complete. Continue the application
+   request only if its fingerprint is identical; otherwise abort it before transmission.
 8. Treat any error after a matching request is continued as outcome-unknown and never
    retry automatically. Independent target reconciliation is still required for
    verified success.
@@ -45,9 +47,16 @@ the comparison because Chromium regenerates that value on every request. The pre
 wire-body hash is retained as evidence but is not the semantic dispatch key. Streaming,
 nested multipart, and submit actions that generate more than one write fail closed.
 
-File selection itself runs under a write-blocking route. If a page auto-uploads on the
-file input's `change` event, that request is aborted and the action fails. Effect Browser
-does not pretend that an unreviewed upload succeeded.
+File selection itself runs under a write-verifying route. If a page auto-uploads on the
+file input's `change` event, the request is allowed only when its exact origin is
+configured and one multipart part matches the approved document SHA-256. The receipt
+records the request fingerprint. Any extra, unconfigured, raw, or changed write is
+aborted. Effect Browser does not pretend that a blocked upload succeeded.
+
+Invisible reCAPTCHA Enterprise flows can make supporting POSTs before the application
+request. Only known reCAPTCHA paths on Google or recaptcha.net may continue; the
+application endpoint is still the sole reviewed commit. Visible CAPTCHA text or a human
+challenge remains a hard handoff.
 
 ## Proof in the synthetic ATS
 
@@ -56,5 +65,8 @@ then verifies that the approved multipart request creates exactly one durable
 application whose résumé hash matches review. A payload-drift mode generates a new
 JavaScript nonce after browser reconstruction. The second fingerprint differs, the
 route aborts it, the task reports failure, and the ledger remains empty. An auto-upload
-mode proves the server receives zero file-change requests. A stronger model cannot
-reproduce this guarantee because enforcement lives at the browser/network boundary.
+mode proves the server receives zero file-change requests without an upload-origin
+allowlist and exactly one with an allowlist plus matching document hash. A delayed-submit
+mode proves the route remains armed until the reviewed request appears. A stronger model
+cannot reproduce this guarantee because enforcement lives at the browser/network
+boundary.
