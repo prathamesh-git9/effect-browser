@@ -487,6 +487,29 @@ def test_dashboard_renders_multi_search_dag_and_cited_result(
 
         def plan(self, query, *, external_commit_authorized):
             assert external_commit_authorized is False
+            time.sleep(1.2)
+            if "partial failure" in query.casefold():
+                return MissionPlan(
+                    summary="Retain useful research when one source fails.",
+                    steps=(
+                        MissionPlanStep(
+                            key="surviving_source",
+                            kind=MissionStepKind.RESEARCH,
+                            instruction="Research the surviving source.",
+                        ),
+                        MissionPlanStep(
+                            key="failing_source",
+                            kind=MissionStepKind.RESEARCH,
+                            instruction="Research the failing source.",
+                        ),
+                        MissionPlanStep(
+                            key="comparison",
+                            kind=MissionStepKind.SYNTHESIS,
+                            instruction="Compare both cited sources.",
+                            depends_on=("surviving_source", "failing_source"),
+                        ),
+                    ),
+                )
             return MissionPlan(
                 summary="Compare two independent evidence streams.",
                 steps=(
@@ -511,6 +534,15 @@ def test_dashboard_renders_multi_search_dag_and_cited_result(
 
     class Researcher:
         def search(self, query):
+            if "failing source" in query:
+                raise RuntimeError("provider response exceeded its safe output limit")
+            if "surviving source" in query:
+                return ResearchEvidence(
+                    query=query,
+                    summary="Useful research survived the other source failure.",
+                    citation_urls=("https://evidence.example/surviving",),
+                    provider_response_sha256="c" * 64,
+                )
             slug = "a" if query.endswith("A.") else "b"
             return ResearchEvidence(
                 query=query,
@@ -564,12 +596,47 @@ def test_dashboard_renders_multi_search_dag_and_cited_result(
                 "Research source A and source B, then compare the evidence."
             )
             page.get_by_role("button", name="Plan and run mission").click()
+            page.locator("#mission-progress").wait_for(state="visible")
+            page.wait_for_function(
+                "document.querySelector('#mission-elapsed').textContent !== '0s'"
+            )
             page.locator("#mission-view").wait_for(state="visible")
 
             assert page.locator("#mission-status").inner_text().casefold() == "completed"
+            assert page.locator("#mission-progress").is_hidden()
             assert page.locator("#mission-steps .mission-step").count() == 3
             assert "A and B were compared" in page.locator("#mission-answer").inner_text()
             assert page.locator("#mission-answer .source-link").count() == 2
+
+            page.reload(wait_until="networkidle")
+            page.locator("#mission-view").wait_for(state="visible")
+            assert page.locator("#mission-status").inner_text().casefold() == "completed"
+            assert "A and B were compared" in page.locator("#mission-answer").inner_text()
+
+            page.locator("#autopilot-query").fill(
+                "Research a partial failure and preserve any useful source output."
+            )
+            page.get_by_role("button", name="Plan and run mission").click()
+            page.wait_for_function(
+                "document.querySelector('#mission-status').textContent === 'failed'"
+            )
+            steps = page.locator("#mission-steps").inner_text()
+            assert "Useful research survived the other source failure." in steps
+            assert "provider response exceeded its safe output limit" in steps
+            assert "dependency did not succeed: failing_source" in steps
+            page.wait_for_function(
+                "document.querySelectorAll('#missions [data-mission]').length === 2"
+            )
+            assert page.locator("#missions [data-mission]").count() == 2
+
+            page.reload(wait_until="networkidle")
+            page.wait_for_function(
+                "document.querySelector('#mission-status').textContent === 'failed'"
+            )
+            assert (
+                "provider response exceeded its safe output limit"
+                in page.locator("#mission-steps").inner_text()
+            )
             browser.close()
     finally:
         server.should_exit = True
