@@ -1,3 +1,4 @@
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -6,6 +7,15 @@ import pytest
 
 from effect_browser.browser.playwright import PlaywrightDriver
 from effect_browser.domain import ActionKind, ProposedAction
+
+
+def _browser_sandbox_enabled() -> bool:
+    return os.getenv("EFFECT_BROWSER_BROWSER_SANDBOX", "true").casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 class _SessionHandler(BaseHTTPRequestHandler):
@@ -57,6 +67,7 @@ def test_cookie_and_local_storage_survive_a_browser_restart(tmp_path: Path) -> N
     first = PlaywrightDriver(
         artifacts_directory=tmp_path / "first-artifacts",
         allowed_origins=(origin,),
+        sandbox=_browser_sandbox_enabled(),
     )
     try:
         first.execute(
@@ -73,6 +84,7 @@ def test_cookie_and_local_storage_survive_a_browser_restart(tmp_path: Path) -> N
     second = PlaywrightDriver(
         artifacts_directory=tmp_path / "second-artifacts",
         allowed_origins=(origin,),
+        sandbox=_browser_sandbox_enabled(),
     )
     try:
         second.restore_storage_state(storage_state, checkpoint_ordinal=1)

@@ -1,3 +1,4 @@
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +11,15 @@ from effect_browser.domain import ActionKind, ProposedAction, StepChoice
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers.reactive import bind_choice
 from effect_browser.transmission import TransmissionBlocked
+
+
+def _browser_sandbox_enabled() -> bool:
+    return os.getenv("EFFECT_BROWSER_BROWSER_SANDBOX", "true").casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def test_failed_browser_launch_releases_playwright_runtime(
@@ -90,6 +100,7 @@ def test_navigation_redirect_cannot_cross_the_bound_origin(tmp_path: Path) -> No
 
     driver = PlaywrightDriver(
         headless=True,
+        sandbox=_browser_sandbox_enabled(),
         artifacts_directory=tmp_path / "artifacts",
         allowed_origins=(source_origin,),
     )
@@ -171,6 +182,7 @@ def test_allowed_redirect_is_routed_once_and_rendered(tmp_path: Path) -> None:
         thread.start()
     driver = PlaywrightDriver(
         headless=True,
+        sandbox=_browser_sandbox_enabled(),
         artifacts_directory=tmp_path / "artifacts",
         allowed_origins=(source_origin, target_origin),
     )
@@ -229,6 +241,7 @@ def test_navigation_keeps_page_background_writes_blocked_without_failing(
     origin = f"http://127.0.0.1:{server.server_port}"
     driver = PlaywrightDriver(
         headless=True,
+        sandbox=_browser_sandbox_enabled(),
         artifacts_directory=tmp_path / "artifacts",
         allowed_origins=(origin,),
     )
@@ -292,6 +305,7 @@ def test_privacy_rejection_closes_wall_while_telemetry_stays_blocked(
     origin = f"http://127.0.0.1:{server.server_port}"
     driver = PlaywrightDriver(
         headless=True,
+        sandbox=_browser_sandbox_enabled(),
         artifacts_directory=tmp_path / "artifacts",
         allowed_origins=(origin,),
     )
