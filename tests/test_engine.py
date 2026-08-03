@@ -1068,6 +1068,98 @@ def test_reactive_provider_failure_becomes_truthful_blocker(service) -> None:
     assert "success is not claimed" in result.message
 
 
+@pytest.mark.parametrize(
+    ("instruction_suffix", "final_path", "expected_status"),
+    (
+        ("", "/demo-capabilities", TaskStatus.SUCCEEDED),
+        ("", "/login", TaskStatus.FAILED),
+        (" and report the page title", "/demo-capabilities", TaskStatus.FAILED),
+    ),
+)
+def test_finish_url_verifies_only_an_exact_navigation_only_goal(
+    service,
+    instruction_suffix: str,
+    final_path: str,
+    expected_status: TaskStatus,
+) -> None:
+    target_url = f"{BASE_URL}/demo-capabilities"
+
+    class NavigationOnlyPlanner:
+        name = "navigation-only"
+
+        @staticmethod
+        def plan(_request):
+            return (
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=target_url,
+                    description="Open the exact requested URL.",
+                ),
+                ProposedAction(
+                    kind=ActionKind.FINISH,
+                    expected_outcome=target_url,
+                    description="Finish after exact URL verification.",
+                ),
+            )
+
+    class NavigationSnapshotDriver(FakeDriver):
+        def execute(self, action: ProposedAction) -> BrowserReceipt:
+            receipt = super().execute(action)
+            if action.kind is ActionKind.NAVIGATE:
+                self.url = f"{BASE_URL}{final_path}"
+                return receipt.model_copy(
+                    update={
+                        "url": self.url,
+                        "evidence_sha256": digest(
+                            {"url": self.url, "values": self.values}
+                        ),
+                    }
+                )
+            return receipt
+
+        def snapshot(self) -> PageSnapshot:
+            observation = self.observe()
+            return PageSnapshot(
+                url=observation.url,
+                title="Synthetic capability page",
+                state_sha256=observation.state_sha256,
+                text_excerpt="Rendered content deliberately contains no URL.",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction=f"Open {target_url}{instruction_suffix}",
+        start_url=target_url,
+        planner=NavigationOnlyPlanner(),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=NavigationSnapshotDriver(RemoteSystem()),
+    )
+
+    actions = service.store.list_actions(TENANT, task.id)
+    finish = actions[-1]
+    assert result.task.status is expected_status
+    assert finish.proposal.kind is ActionKind.FINISH
+    assert finish.state is (
+        ActionState.SUCCEEDED
+        if expected_status is TaskStatus.SUCCEEDED
+        else ActionState.FAILED
+    )
+    receipt = service.store.get_receipt(TENANT, finish.id)
+    assert (receipt is not None) is (expected_status is TaskStatus.SUCCEEDED)
+    if receipt is not None:
+        assert receipt.url == target_url
+    else:
+        assert finish.failure == (
+            "ValueError: rendered page did not contain the expected finish outcome"
+        )
+
+
 def test_stale_reactive_proposal_is_never_executed_and_replanning_succeeds(
     service,
 ) -> None:

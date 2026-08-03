@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from effect_browser.autonomy import auto_approval_reason
@@ -731,7 +733,11 @@ class EffectBrowserService:
 
             self.store.start_dispatch(tenant_id, action.id)
             try:
-                receipt = self._execute(action.proposal, driver)
+                receipt = self._execute(
+                    action.proposal,
+                    driver,
+                    instruction=task.instruction,
+                )
                 if action.proposal.kind is ActionKind.SUBMIT:
                     spec = action.proposal.reconciliation
                     if spec is None:
@@ -1043,7 +1049,11 @@ class EffectBrowserService:
                 driver.execute(action.proposal)
 
     @staticmethod
-    def _execute(proposal, driver: BrowserDriver) -> BrowserReceipt:
+    def _execute(
+        proposal,
+        driver: BrowserDriver,
+        instruction: str | None = None,
+    ) -> BrowserReceipt:
         if proposal.kind is ActionKind.FINISH:
             expected_phrase = (proposal.expected_outcome or "").strip()
             if expected_phrase:
@@ -1052,7 +1062,13 @@ class EffectBrowserService:
                 # copying target-controlled content into the store or audit log.
                 snapshot = driver.snapshot()
                 searchable = f"{snapshot.title}\n{snapshot.text_excerpt}".casefold()
-                if expected_phrase.casefold() not in searchable:
+                navigation_verified = _is_navigation_only_url_expectation(
+                    instruction, expected_phrase
+                ) and _same_navigation_url(expected_phrase, snapshot.url)
+                if (
+                    not navigation_verified
+                    and expected_phrase.casefold() not in searchable
+                ):
                     raise ValueError(
                         "rendered page did not contain the expected finish outcome"
                     )
@@ -1142,3 +1158,59 @@ def _validate_finish_expectation(
         raise ValueError(
             "finish expected_outcome must be an exact phrase from the user instruction"
         )
+
+
+def _is_navigation_only_url_expectation(
+    instruction: str | None,
+    expected_outcome: str,
+) -> bool:
+    """Recognize only a complete instruction whose sole goal is opening one URL."""
+    if instruction is None or _canonical_navigation_url(expected_outcome) is None:
+        return False
+    command = (
+        r"(?:open|visit|load|display|show)"
+        r"|(?:(?:navigate|go)\s+to)"
+    )
+    target_label = r"(?:(?:the\s+)?(?:page|site|website|url)\s+(?:at\s+)?)?"
+    return (
+        re.fullmatch(
+            rf"\s*(?:please\s+)?(?:{command})\s+{target_label}"
+            rf"{re.escape(expected_outcome)}\s*[.!?]?\s*",
+            instruction,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _canonical_navigation_url(value: str) -> tuple[object, ...] | None:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.casefold()
+    if (
+        scheme not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    if port == (443 if scheme == "https" else 80):
+        port = None
+    return (
+        scheme,
+        parsed.hostname.casefold(),
+        port,
+        parsed.path or "/",
+        parsed.query,
+        parsed.fragment,
+    )
+
+
+def _same_navigation_url(expected: str, observed: str) -> bool:
+    expected_url = _canonical_navigation_url(expected)
+    return expected_url is not None and expected_url == _canonical_navigation_url(
+        observed
+    )
