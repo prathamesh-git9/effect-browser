@@ -950,6 +950,51 @@ def test_grounded_research_requires_tool_use_and_preserves_provider_citations(
     assert result.citation_urls == ("https://docs.example/source",)
 
 
+def test_grounded_research_bounds_oversized_provider_summary(monkeypatch) -> None:
+    summary = "evidence " * 600
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps({"summary": summary}),
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://docs.example/source",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            },
+        )
+
+    monkeypatch.setenv("TEST_MISSION_API_KEY", "synthetic")
+    researcher = ResponsesResearcher(
+        ProviderRuntime(
+            name="test",
+            model="test-model",
+            api_key_env="TEST_MISSION_API_KEY",
+            base_url="https://provider.example/v1",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = researcher.search("Find the official source.")
+
+    assert result.summary == summary[:4_000]
+    assert result.citation_urls == ("https://docs.example/source",)
+
+
 def test_responses_mission_planner_uses_a_strict_bounded_dag_schema(
     monkeypatch,
 ) -> None:

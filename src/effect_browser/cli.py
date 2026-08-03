@@ -194,6 +194,10 @@ def do_browser_task(
     """Decompose and run one multi-search/browser mission from one query."""
     settings = get_settings()
     service = _service()
+    typer.echo(
+        "Planning and running the mission; browser work is headless by default...",
+        err=True,
+    )
     result = MissionCoordinator(
         store=service.store,
         autopilot=AutopilotCoordinator(service=service, settings=settings),
