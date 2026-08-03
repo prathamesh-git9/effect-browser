@@ -111,6 +111,24 @@ crash window.
 Evidence: `artifacts/realworld/live-crash/`, including the post-green sanitized
 diagnostic at `attempt-4-tcp/post-run-diagnostic.sanitized.json`.
 
+## One-query acceptance regressions
+
+These runs followed the reliability battery after the original green push because a
+passing safety suite did not by itself prove that one ordinary query produced a
+visible, useful result.
+
+| Mission | Target site or source | Outcome | Exact stopping point | Root cause |
+| --- | --- | --- | --- | --- |
+| Simple Python 3.13 free-threading research, pre-fix | Official Python documentation through the configured provider | failed | Live search returned cited research, but the research step rejected the summary and synthesis was skipped. | The provider returned more than the model's 4,000-character field limit, so useful grounded output was discarded during validation. |
+| Simple Python 3.13 free-threading research, post-fix | Official Python documentation through the configured provider | succeeded | Both research and synthesis completed in 33.76 seconds with four official-documentation citations and a final answer. | Provider prose was bounded before strict model validation; citations and the structured evidence contract remained intact. |
+| Exact local URL navigation, pre-fix | Bundled capability page at `127.0.0.1` | failed | Navigation succeeded and a receipt was persisted, but the subsequent finish action rejected the run. | The planner used the requested URL as the finish expectation while verification searched only rendered title/body text, where the URL did not appear. |
+| Rendered-phrase navigation control | Bundled capability page at `127.0.0.1` | succeeded | Navigation and finish both completed when the query named an exact phrase rendered by the page. | This control proved the browser and receipt path worked; it isolated the defect to exact-URL finish verification. |
+| Exact local URL navigation without an allowlist | Bundled capability page at `127.0.0.1` | blocked | The browser step stopped before navigation with `public query targets must use HTTPS`. | Loopback HTTP remains fail-closed unless its exact origin is explicitly configured for local testing. |
+| Exact local URL navigation, post-fix and allowlisted | Bundled capability page at `127.0.0.1` | succeeded | The one-query command completed in 14.66 seconds with separate durable navigation and finish receipts bound to the exact final URL. | A navigation-only instruction may now use an exact, credential-free HTTP(S) final-URL match as finish evidence; compound requests still require their normal rendered evidence. |
+
+Evidence: the persisted local mission ledger and gitignored diagnostics under
+`artifacts/one-query-repro/`.
+
 ## Evidence handling and limits
 
 The real evidence remains local under the gitignored `artifacts/realworld/` tree. It
