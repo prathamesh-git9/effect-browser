@@ -1,24 +1,64 @@
 # Effect Browser
 
-Effect Browser is a one-query, crash-safe control plane for multi-search research and
-AI-driven browser operations. It is
-not another “click things with an LLM” wrapper. It focuses on the failure ordinary
-browser agents handle badly: the target may commit an external action just before the
-browser or worker crashes.
+Browser agents can duplicate irreversible actions after crashes or stale-page drift;
+`Effect Browser` persists typed intent, binds approval to the exact outgoing request,
+and reconciles ambiguous outcomes instead of blindly retrying.
 
-Models propose typed actions. Effect Browser persists them, auto-runs safe navigation,
-requires exact action-bound authority for external commits, and records
-`OUTCOME_UNKNOWN` instead of blindly clicking twice. Authority can come from an
-operator at the commit boundary or from a bounded scope recorded when the task is
-created. A deterministic reconciler can close the gap when the target exposes a stable
-business reference or receipt.
+## Run the offline crash proof
 
-Read the [research decision](docs/RESEARCH.md) and [technical spec](docs/SPEC.md).
-Deployment and recovery procedures are in the [operations runbook](docs/OPERATIONS.md).
-The exact one-query capability and its hard limits are in
-[the autopilot contract](docs/AUTOPILOT.md). Compound-query decomposition,
-parallel-search, and parent-authority semantics are in
-[the mission contract](docs/MISSIONS.md).
+Install the project, Chromium, and start the bundled local target in one terminal:
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m playwright install chromium
+effect-browser init
+effect-browser serve
+```
+
+Then run the deterministic crash-and-recovery scenario in a second terminal:
+
+```powershell
+effect-browser killer-demo
+```
+
+It needs no model credentials and contacts no third-party service. The demo injects a
+crash after the local target commits, restarts the engine, refuses a blind redispatch,
+reconciles the receipt, and ends with `status=succeeded, orders=1,
+duplicate_attempts=0`.
+
+## What the tests prove
+
+Default-branch verification reports **233 passed and 1 skipped**; `ruff check .` and
+`ruff format --check .` also pass. The skipped case is the opt-in live Grok test,
+which requires both `RUN_LIVE_GROK=1` and an API key.
+
+- State-machine and recovery tests cover action-bound approvals, payload drift,
+  explicit `OUTCOME_UNKNOWN`, reconciliation, durable replay, and audit integrity.
+- Real local-browser tests cover dynamic forms, delayed controls, popups, iframes,
+  open shadow DOM, downloads, native validation, request interception, and stale-page
+  invalidation.
+- Process-crash tests terminate a worker after the bundled target commits and verify
+  that recovery does not send a second write.
+- Mission tests cover bounded graph construction, persisted child progress,
+  dependency failure, parallel research, and limits that prevent one query from
+  multiplying write authority.
+
+## Not implemented or production-hardened
+
+- This is not an exactly-once guarantee for arbitrary websites; without target-side
+  idempotency or authoritative lookup, an ambiguous write stops for manual resolution.
+- CAPTCHA, MFA, credentials, payments, missing facts, and unsupported multi-write
+  workflows are stop conditions, not challenges the browser attempts to bypass.
+- The built-in identity headers are for local evaluation; authentication, RBAC,
+  hardened secret handling, and an Internet-facing deployment boundary are not
+  included.
+- The default suite does not prove live OpenAI/Grok reliability, arbitrary-site task
+  completion, production throughput, multi-node operation, or behavior under real
+  network partitions.
+
+Read the [research decision](docs/RESEARCH.md), [technical spec](docs/SPEC.md),
+[operations runbook](docs/OPERATIONS.md), [autopilot contract](docs/AUTOPILOT.md), and
+[mission contract](docs/MISSIONS.md) for the detailed boundaries.
 
 ## One-query mission mode
 
