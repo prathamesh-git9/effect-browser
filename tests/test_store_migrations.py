@@ -133,6 +133,16 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
         task_columns = {
             column["name"] for column in inspect(store.engine).get_columns("tasks")
         }
+        task_session_columns = {
+            column["name"]
+            for column in inspect(store.engine).get_columns("task_sessions")
+        }
+        task_session_primary_key = inspect(store.engine).get_pk_constraint(
+            "task_sessions"
+        )
+        task_session_foreign_keys = inspect(store.engine).get_foreign_keys(
+            "task_sessions"
+        )
         with store.engine.connect() as connection:
             payload_sha256 = connection.execute(
                 text("SELECT payload_sha256 FROM approvals WHERE id='approval-1'")
@@ -148,5 +158,21 @@ def test_initialize_migrates_and_backfills_legacy_payload_approval(
         "document_sha256",
         "autonomy_scope",
     } <= task_columns
+    assert {
+        "task_id",
+        "tenant_id",
+        "ciphertext",
+        "format_version",
+        "checkpoint_ordinal",
+        "updated_at",
+        "expires_at",
+    } == task_session_columns
+    assert task_session_primary_key["constrained_columns"] == ["task_id"]
+    assert any(
+        key["constrained_columns"] == ["task_id"]
+        and key["referred_table"] == "tasks"
+        and key["referred_columns"] == ["id"]
+        for key in task_session_foreign_keys
+    )
     assert proposal.outgoing_review is not None
     assert payload_sha256 == proposal.outgoing_review.payload_sha256

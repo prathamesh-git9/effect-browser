@@ -22,6 +22,7 @@ from effect_browser.domain import (
     ProposedAction,
     ReconciliationSpec,
     RiskClass,
+    StepChoice,
     TaskStatus,
     digest,
     utc_now,
@@ -30,7 +31,11 @@ from effect_browser.engine import CrashAfterCommitDriver, SimulatedProcessCrash
 from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlanner
 from effect_browser.providers.base import ProviderError
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
-from effect_browser.transmission import TransmissionReviewError, fingerprint_request
+from effect_browser.transmission import (
+    TransmissionBlocked,
+    TransmissionReviewError,
+    fingerprint_request,
+)
 
 from .conftest import BASE_URL, TENANT, FakeDriver, RemoteSystem
 
@@ -70,6 +75,26 @@ def test_external_commit_requires_bound_approval(service) -> None:
     assert paused.next_action.state is ActionState.APPROVAL_REQUIRED
     assert paused.next_action.observation_sha256
     assert remote.commits == 0
+
+
+def test_reversible_transmission_block_does_not_claim_approval_drift(service) -> None:
+    class BlockingNavigationDriver(FakeDriver):
+        def execute(self, _action: ProposedAction) -> BrowserReceipt:
+            raise TransmissionBlocked("synthetic page-load telemetry was blocked")
+
+    task = create(service)
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=BlockingNavigationDriver(RemoteSystem()),
+    )
+
+    assert result.message == (
+        "browser action triggered an unreviewed request and was blocked before "
+        "transmission"
+    )
+    assert "approval" not in result.message
 
 
 def test_normal_run_never_follows_off_origin_reconciliation(service) -> None:
@@ -245,6 +270,117 @@ def test_zero_request_submit_preview_can_be_audited_as_superseded(service) -> No
         ).scalar_one()
     assert released is None
     assert service.store.verify_audit(TENANT).valid
+
+
+def test_store_atomically_supersedes_an_invalidated_hash_bound_proposal(store) -> None:
+    task_id = uuid4()
+    proposal = ProposedAction(
+        kind=ActionKind.WAIT,
+        wait_ms=100,
+        description="Wait against one observed page state.",
+        planned_from_sha256="a" * 64,
+    )
+    store.create_task(
+        task_id=task_id,
+        tenant_id=TENANT,
+        instruction="Replan if the observed page changes.",
+        start_url=BASE_URL,
+        provider="reactive-store-test",
+        actions=(proposal,),
+    )
+    action = store.current_action(TENANT, task_id)
+    assert action is not None
+    fresh = Observation(
+        url=BASE_URL,
+        title="Changed page",
+        state_sha256="b" * 64,
+        captured_at=utc_now(),
+    )
+    prepared = store.prepare_action(
+        TENANT,
+        action.id,
+        Observation(
+            url=BASE_URL,
+            title="Original page",
+            state_sha256="a" * 64,
+            captured_at=utc_now(),
+        ),
+        PolicyDecision(
+            allowed=True,
+            risk=RiskClass.READ,
+            requires_approval=False,
+            reason="Synthetic reversible action.",
+        ),
+    )
+    invalidated = store.invalidate_approval(
+        TENANT,
+        prepared.id,
+        fresh.state_sha256,
+    )
+    assert invalidated.state is ActionState.INVALIDATED
+
+    superseded = store.supersede_stale_proposal(
+        tenant_id=TENANT,
+        action_id=invalidated.id,
+        expected_version=invalidated.version,
+        observation=fresh,
+    )
+
+    advanced = store.get_task(TENANT, task_id)
+    assert superseded.state is ActionState.SUPERSEDED
+    assert superseded.failure == "page changed after reactive planning before dispatch"
+    assert superseded.observation_sha256 == fresh.state_sha256
+    assert advanced.current_ordinal == 1
+    assert advanced.status is TaskStatus.QUEUED
+    assert store.current_action(TENANT, task_id) is None
+    event = store.events(TENANT, task_id)[-1]
+    assert event.kind == "action.stale_proposal_superseded"
+    assert event.payload["expected_observation_sha256"] == "a" * 64
+    assert event.payload["actual_observation_sha256"] == "b" * 64
+    assert event.payload["automatic_retry"] is False
+    assert store.verify_audit(TENANT).valid
+
+
+def test_stale_supersession_rechecks_the_stored_action_hash(store) -> None:
+    task_id = uuid4()
+    proposal = ProposedAction(
+        kind=ActionKind.WAIT,
+        wait_ms=100,
+        description="Hash-bound reactive wait.",
+        planned_from_sha256="a" * 64,
+    )
+    store.create_task(
+        task_id=task_id,
+        tenant_id=TENANT,
+        instruction="Never supersede a tampered proposal.",
+        start_url=BASE_URL,
+        provider="reactive-store-hash-test",
+        actions=(proposal,),
+    )
+    action = store.current_action(TENANT, task_id)
+    assert action is not None
+    with store.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE actions SET action_sha256=:forged WHERE id=:action_id"),
+            {"forged": "f" * 64, "action_id": str(action.id)},
+        )
+
+    with pytest.raises(ConflictError, match="stored action no longer matches"):
+        store.supersede_stale_proposal(
+            tenant_id=TENANT,
+            action_id=action.id,
+            expected_version=action.version,
+            observation=Observation(
+                url=BASE_URL,
+                title="Changed page",
+                state_sha256="b" * 64,
+                captured_at=utc_now(),
+            ),
+        )
+
+    unchanged = store.get_task(TENANT, task_id)
+    assert unchanged.current_ordinal == 0
+    assert store.get_action(TENANT, action.id).state is ActionState.PENDING
 
 
 def test_bounded_autonomy_commits_without_per_action_intervention(service) -> None:
@@ -736,6 +872,99 @@ def test_rehydration_never_replays_a_completed_upload(
     assert executed == [ActionKind.NAVIGATE]
 
 
+def test_rehydration_skips_actions_covered_by_session_checkpoint(
+    service, monkeypatch
+) -> None:
+    task_id = uuid4()
+    navigate = ProposedAction(
+        kind=ActionKind.NAVIGATE,
+        url=BASE_URL,
+        description="Restore the page using persisted browser state.",
+    )
+    consent = ProposedAction(
+        kind=ActionKind.CLICK,
+        locator=Locator(selector="#reject-all", adaptive_id="reject-all:0"),
+        description="Reject optional cookies once.",
+        target_interaction="consent",
+        target_name="Reject all",
+    )
+    history = [
+        BrowserAction(
+            id=uuid4(),
+            tenant_id=TENANT,
+            task_id=task_id,
+            ordinal=0,
+            proposal=navigate,
+            state=ActionState.SUCCEEDED,
+            action_sha256=navigate.action_hash(),
+            version=1,
+        ),
+        BrowserAction(
+            id=uuid4(),
+            tenant_id=TENANT,
+            task_id=task_id,
+            ordinal=1,
+            proposal=consent,
+            state=ActionState.SUCCEEDED,
+            action_sha256=consent.action_hash(),
+            version=1,
+        ),
+    ]
+    executed: list[ActionKind] = []
+
+    class RecordingDriver:
+        restored_checkpoint_ordinal = 2
+
+        def execute(self, action: ProposedAction):
+            executed.append(action.kind)
+            return None
+
+    monkeypatch.setattr(service.store, "list_actions", lambda *_args: history)
+
+    service._rehydrate(TENANT, task_id, RecordingDriver(), current_ordinal=2)
+
+    assert executed == [ActionKind.NAVIGATE]
+
+
+def test_rehydration_replays_consent_after_older_session_checkpoint(
+    service, monkeypatch
+) -> None:
+    task_id = uuid4()
+    consent = ProposedAction(
+        kind=ActionKind.CLICK,
+        locator=Locator(selector="#reject-all", adaptive_id="reject-all:0"),
+        description="Restore consent recorded after the durable checkpoint.",
+        target_interaction="consent",
+        target_name="Reject all",
+    )
+    history = [
+        BrowserAction(
+            id=uuid4(),
+            tenant_id=TENANT,
+            task_id=task_id,
+            ordinal=1,
+            proposal=consent,
+            state=ActionState.SUCCEEDED,
+            action_sha256=consent.action_hash(),
+            version=1,
+        )
+    ]
+    executed: list[ActionKind] = []
+
+    class RecordingDriver:
+        restored_checkpoint_ordinal = 1
+
+        def execute(self, action: ProposedAction):
+            executed.append(action.kind)
+            return None
+
+    monkeypatch.setattr(service.store, "list_actions", lambda *_args: history)
+
+    service._rehydrate(TENANT, task_id, RecordingDriver(), current_ordinal=2)
+
+    assert executed == [ActionKind.CLICK]
+
+
 def test_reactive_task_requires_verified_fact_before_planner_can_guess(
     service,
 ) -> None:
@@ -837,6 +1066,214 @@ def test_reactive_provider_failure_becomes_truthful_blocker(service) -> None:
     assert result.task.status is TaskStatus.BLOCKED
     assert result.next_action is None
     assert "success is not claimed" in result.message
+
+
+def test_stale_reactive_proposal_is_never_executed_and_replanning_succeeds(
+    service,
+) -> None:
+    class DriftThenFinishPlanner:
+        name = "drift-then-finish"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def choose(self, _request):
+            self.calls += 1
+            if self.calls == 1:
+                return StepChoice(
+                    kind=ActionKind.WAIT,
+                    wait_ms=100,
+                    description="Wait using the stale proposal.",
+                )
+            return StepChoice(
+                kind=ActionKind.FINISH,
+                description="Finish after planning from a stable observation.",
+            )
+
+    class DriftOnceDriver(FakeDriver):
+        def __init__(self, remote: RemoteSystem) -> None:
+            super().__init__(remote)
+            self.snapshot_calls = 0
+            self.executed: list[ActionKind] = []
+
+        def snapshot(self) -> PageSnapshot:
+            self.snapshot_calls += 1
+            observation = self.observe()
+            planned_sha256 = (
+                digest({"synthetic_stale_snapshot": self.snapshot_calls})
+                if self.snapshot_calls == 1
+                else observation.state_sha256
+            )
+            return PageSnapshot(
+                url=observation.url,
+                title=observation.title,
+                state_sha256=planned_sha256,
+                text_excerpt="Stable synthetic page.",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+
+        def execute(self, action: ProposedAction) -> BrowserReceipt:
+            self.executed.append(action.kind)
+            return super().execute(action)
+
+    planner = DriftThenFinishPlanner()
+    service.step_planners = {planner.name: planner}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Finish after safely replanning a stale browser action.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner(planner.name),
+    )
+    driver = DriftOnceDriver(RemoteSystem())
+
+    result = service.run(tenant_id=TENANT, task_id=task.id, driver=driver)
+
+    actions = service.store.list_actions(TENANT, task.id)
+    stale = next(action for action in actions if action.proposal.kind is ActionKind.WAIT)
+    assert result.task.status is TaskStatus.SUCCEEDED
+    assert planner.calls == 2
+    assert driver.executed == [ActionKind.NAVIGATE]
+    assert stale.state is ActionState.SUPERSEDED
+    assert all(
+        event.kind != "action.dispatching" or event.action_id != stale.id
+        for event in service.store.events(TENANT, task.id)
+    )
+    assert any(
+        event.kind == "action.stale_proposal_superseded"
+        and event.action_id == stale.id
+        and event.payload["automatic_retry"] is False
+        for event in service.store.events(TENANT, task.id)
+    )
+
+
+def test_reactive_instability_is_bounded_to_three_automatic_replans(service) -> None:
+    class AlwaysWaitPlanner:
+        name = "always-drifting"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def choose(self, _request):
+            self.calls += 1
+            return StepChoice(
+                kind=ActionKind.WAIT,
+                wait_ms=100,
+                description=f"Stale wait proposal {self.calls}.",
+            )
+
+    class AlwaysDriftingDriver(FakeDriver):
+        def __init__(self, remote: RemoteSystem) -> None:
+            super().__init__(remote)
+            self.snapshot_calls = 0
+            self.executed: list[ActionKind] = []
+
+        def snapshot(self) -> PageSnapshot:
+            self.snapshot_calls += 1
+            observation = self.observe()
+            return PageSnapshot(
+                url=observation.url,
+                title=observation.title,
+                state_sha256=digest({"synthetic_stale_snapshot": self.snapshot_calls}),
+                text_excerpt="Continuously changing synthetic page.",
+                candidates=(),
+                captured_at=observation.captured_at,
+            )
+
+        def execute(self, action: ProposedAction) -> BrowserReceipt:
+            self.executed.append(action.kind)
+            return super().execute(action)
+
+    planner = AlwaysWaitPlanner()
+    service.step_planners = {planner.name: planner}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Stop after bounded replanning on an unstable page.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner(planner.name),
+    )
+    driver = AlwaysDriftingDriver(RemoteSystem())
+
+    result = service.run(tenant_id=TENANT, task_id=task.id, driver=driver)
+
+    actions = service.store.list_actions(TENANT, task.id)
+    stale_actions = [
+        action
+        for action in actions
+        if action.failure == "page changed after reactive planning before dispatch"
+    ]
+    events = service.store.events(TENANT, task.id)
+    assert result.task.status is TaskStatus.BLOCKED
+    assert planner.calls == 4
+    assert len(stale_actions) == 4
+    assert all(action.state is ActionState.SUPERSEDED for action in stale_actions)
+    assert driver.executed == [ActionKind.NAVIGATE]
+    assert sum(event.kind == "action.stale_proposal_superseded" for event in events) == 4
+    assert not any(
+        event.kind == "action.dispatching"
+        and event.action_id in {action.id for action in stale_actions}
+        for event in events
+    )
+    blocked = next(event for event in events if event.kind == "task.blocked")
+    assert blocked.payload["challenge"] == "reactive_page_instability"
+    assert "no stale proposal was dispatched" in result.message
+
+
+def test_reactive_engine_stops_before_planning_on_payment_fields(service) -> None:
+    class MustNotPlanPayment:
+        name = "payment-stop"
+
+        def choose(self, _request):
+            raise AssertionError("payment fields must stop before a provider call")
+
+    class PaymentDriver(FakeDriver):
+        def snapshot(self) -> PageSnapshot:
+            observation = self.observe()
+            return PageSnapshot(
+                url=observation.url,
+                title="Payment",
+                state_sha256=observation.state_sha256,
+                text_excerpt="Enter payment details to continue.",
+                candidates=(
+                    ElementCandidate(
+                        id="C001",
+                        tag="input",
+                        role="textbox",
+                        name="Card number",
+                        input_type="text",
+                        interaction="input",
+                        locator=Locator(
+                            selector="#generated-field",
+                            adaptive_id="generated-field:0",
+                        ),
+                    ),
+                ),
+                captured_at=observation.captured_at,
+            )
+
+    service.step_planners = {"payment-stop": MustNotPlanPayment()}
+    task = service.create_task(
+        tenant_id=TENANT,
+        instruction="Prepare the journey only until payment is requested.",
+        start_url=BASE_URL,
+        planner=ReactiveBootstrapPlanner("payment-stop"),
+    )
+
+    result = service.run(
+        tenant_id=TENANT,
+        task_id=task.id,
+        driver=PaymentDriver(RemoteSystem()),
+    )
+
+    assert result.task.status is TaskStatus.BLOCKED
+    assert "payment boundary" in result.message
+    event = next(
+        event
+        for event in service.store.events(TENANT, task.id)
+        if event.kind == "task.blocked"
+    )
+    assert event.kind == "task.blocked"
+    assert event.payload["challenge"] == "payment"
 
 
 def test_reactive_step_budget_blocks_instead_of_overflowing_schema(service) -> None:

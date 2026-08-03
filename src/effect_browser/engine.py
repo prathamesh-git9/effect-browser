@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -11,9 +12,11 @@ from effect_browser.domain import (
     ActionState,
     AutonomyMode,
     AutonomyScope,
+    BrowserAction,
     BrowserReceipt,
     PlanRequest,
     PolicyDecision,
+    ProposedAction,
     Resolution,
     RiskClass,
     RunResult,
@@ -27,12 +30,23 @@ from effect_browser.factual import deterministic_required_choice, planning_facts
 from effect_browser.policy import ActionPolicy
 from effect_browser.providers.base import Planner, ProviderError, StepPlanner
 from effect_browser.providers.reactive import bind_choice
-from effect_browser.store import ConflictError, DatabaseStore
+from effect_browser.session import (
+    SESSION_STATE_FORMAT_VERSION,
+    SessionStateProtector,
+)
+from effect_browser.store import (
+    STALE_PROPOSAL_FAILURE,
+    ConflictError,
+    DatabaseStore,
+)
 from effect_browser.transmission import TransmissionBlocked
 
 
 class SimulatedProcessCrash(BaseException):
     """Test-only crash signal that deliberately bypasses normal exception handling."""
+
+
+_MAX_REACTIVE_REPLANS = 3
 
 
 class CrashAfterCommitDriver:
@@ -57,6 +71,16 @@ class CrashAfterCommitDriver:
     def assert_rehydration_safe(self):
         return self.inner.assert_rehydration_safe()
 
+    @property
+    def restored_checkpoint_ordinal(self) -> int:
+        return getattr(self.inner, "restored_checkpoint_ordinal", 0)
+
+    def restore_storage_state(self, storage_state, checkpoint_ordinal):
+        return self.inner.restore_storage_state(storage_state, checkpoint_ordinal)
+
+    def export_storage_state(self):
+        return self.inner.export_storage_state()
+
     def execute(self, action):
         receipt = self.inner.execute(action)
         if action.kind is ActionKind.SUBMIT and not self.crashed:
@@ -79,6 +103,8 @@ class EffectBrowserService:
         step_planners: dict[str, StepPlanner] | None = None,
         *,
         task_lease_seconds: int = 120,
+        session_protector: SessionStateProtector | None = None,
+        session_retention_hours: int = 7 * 24,
     ) -> None:
         if task_lease_seconds < 1:
             raise ValueError("task_lease_seconds must be positive")
@@ -89,6 +115,10 @@ class EffectBrowserService:
         # duration injectable lets recovery wait for the same durable fencing rule
         # in production and in process-death tests without unsafe lease stealing.
         self.task_lease_seconds = task_lease_seconds
+        if session_retention_hours < 1:
+            raise ValueError("session_retention_hours must be positive")
+        self.session_protector = session_protector
+        self.session_retention_hours = session_retention_hours
 
     def create_task(
         self,
@@ -169,18 +199,26 @@ class EffectBrowserService:
             owner=worker_id,
             lease_seconds=self.task_lease_seconds,
         )
+        checkpoint: dict[str, object] = {}
         try:
-            return self._run_claimed(
+            result = self._run_claimed(
                 tenant_id=tenant_id,
                 task_id=task_id,
                 driver=driver,
                 worker_id=worker_id,
             )
+            checkpoint = self._session_checkpoint(
+                tenant_id=tenant_id,
+                task_id=task_id,
+                driver=driver,
+            )
+            return result
         finally:
             self.store.release_task(
                 tenant_id=tenant_id,
                 task_id=task_id,
                 owner=worker_id,
+                **checkpoint,
             )
 
     def _run_claimed(
@@ -193,6 +231,34 @@ class EffectBrowserService:
     ) -> RunResult:
         task = self.store.get_task(tenant_id, task_id)
         current = self.store.current_action(tenant_id, task_id)
+        # Recovery state is authoritative before browser reconstruction. A dead
+        # worker may have transmitted an external commit, so even replaying prior
+        # "reversible" steps first would create needless target traffic and could
+        # strand recovery behind an unavailable or hostile page. Persist the
+        # no-retry decision without touching the browser at all.
+        if current is not None and current.state is ActionState.DISPATCHING:
+            current = self.store.mark_outcome_unknown(
+                tenant_id,
+                current.id,
+                "worker restarted while the external action was dispatching",
+            )
+            return RunResult(
+                task=self.store.get_task(tenant_id, task_id),
+                next_action=current,
+                message="outcome is unknown; automatic retry is disabled",
+            )
+        if current is not None and current.state is ActionState.OUTCOME_UNKNOWN:
+            return RunResult(
+                task=task,
+                next_action=current,
+                message="outcome is unknown; reconcile or resolve it",
+            )
+        self._restore_session(
+            tenant_id=tenant_id,
+            task_id=task_id,
+            driver=driver,
+            current_ordinal=task.current_ordinal,
+        )
         replay_uploads = bool(
             current is not None
             and current.state is ActionState.PREPARED
@@ -288,6 +354,9 @@ class EffectBrowserService:
                     )
 
         automatic_invalidations = 0
+        stale_replans = _stale_replans_already_used(
+            self.store.list_actions(tenant_id, task_id)
+        )
         while True:
             self.store.renew_task_lease(
                 tenant_id=tenant_id,
@@ -303,6 +372,27 @@ class EffectBrowserService:
             if action is None:
                 step_planner = self.step_planners.get(task.provider)
                 if step_planner is not None:
+                    if stale_replans > _MAX_REACTIVE_REPLANS:
+                        blocked = self.store.block_task(
+                            tenant_id,
+                            task_id,
+                            kind="reactive_page_instability",
+                            reason=(
+                                "the page changed across the maximum number of "
+                                "automatic replans"
+                            ),
+                            evidence=(
+                                f"automatic_replans={_MAX_REACTIVE_REPLANS}; "
+                                "stale proposal was never dispatched"
+                            ),
+                        )
+                        return RunResult(
+                            task=blocked,
+                            message=(
+                                "reactive page instability exhausted the replan "
+                                "budget; no stale proposal was dispatched"
+                            ),
+                        )
                     if task.current_ordinal >= 30:
                         blocked = self.store.block_task(
                             tenant_id,
@@ -470,6 +560,43 @@ class EffectBrowserService:
                 )
             if action.state in {ActionState.PENDING, ActionState.INVALIDATED}:
                 observation = driver.observe()
+                planned_observation = action.proposal.planned_from_sha256
+                stale_reactive_proposal = bool(
+                    task.provider in self.step_planners
+                    and planned_observation
+                    and planned_observation != observation.state_sha256
+                )
+                if stale_reactive_proposal:
+                    superseded = self.store.supersede_stale_proposal(
+                        tenant_id=tenant_id,
+                        action_id=action.id,
+                        expected_version=action.version,
+                        observation=observation,
+                    )
+                    if stale_replans >= _MAX_REACTIVE_REPLANS:
+                        blocked = self.store.block_task(
+                            tenant_id,
+                            task_id,
+                            kind="reactive_page_instability",
+                            reason=(
+                                "the page changed across the maximum number of "
+                                "automatic replans"
+                            ),
+                            evidence=(
+                                f"automatic_replans={_MAX_REACTIVE_REPLANS}; "
+                                "stale proposal was never dispatched"
+                            ),
+                        )
+                        return RunResult(
+                            task=blocked,
+                            next_action=superseded,
+                            message=(
+                                "reactive page instability exhausted the replan "
+                                "budget; no stale proposal was dispatched"
+                            ),
+                        )
+                    stale_replans += 1
+                    continue
                 if action.proposal.kind is ActionKind.HANDOFF:
                     handoff = self.store.require_input(
                         tenant_id=tenant_id,
@@ -665,15 +792,7 @@ class EffectBrowserService:
                 return RunResult(
                     task=self.store.get_task(tenant_id, task_id),
                     next_action=failed,
-                    message=(
-                        "file selection triggered an unreviewed request and was "
-                        "blocked before transmission"
-                        if action.proposal.kind is ActionKind.UPLOAD
-                        else (
-                            "outgoing request changed after approval and was blocked "
-                            "before transmission"
-                        )
-                    ),
+                    message=_transmission_blocked_message(action.proposal),
                 )
             except Exception as exc:
                 if action.proposal.kind in {ActionKind.SUBMIT, ActionKind.UPLOAD}:
@@ -710,6 +829,7 @@ class EffectBrowserService:
                 receipt,
                 task_continues=continues,
             )
+            stale_replans = 0
             completed = self.store.get_task(tenant_id, task_id)
             if completed.status is TaskStatus.SUCCEEDED:
                 return RunResult(task=completed, message="task completed with receipts")
@@ -748,27 +868,119 @@ class EffectBrowserService:
         driver: BrowserDriver,
     ) -> BrowserReceipt | None:
         action = self.store.get_action(tenant_id, action_id)
-        if action.state is ActionState.DISPATCHING:
-            action = self.store.mark_outcome_unknown(
-                tenant_id,
-                action_id,
-                "recovery found an interrupted dispatch",
-            )
-        if action.state is not ActionState.OUTCOME_UNKNOWN:
-            raise ConflictError("action is not awaiting recovery")
-        spec = action.proposal.reconciliation
-        if spec is None:
-            return None
-        task = self.store.get_task(tenant_id, action.task_id)
-        query_origins = (
-            (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+        worker_id = f"reconcile-{uuid4()}"
+        self.store.claim_task(
+            tenant_id=tenant_id,
+            task_id=action.task_id,
+            owner=worker_id,
+            lease_seconds=self.task_lease_seconds,
         )
-        if not self.policy.allows_url(spec.url, query_origins):
-            raise ValueError("reconciliation URL origin is not allowed")
-        receipt = driver.reconcile(spec)
-        if receipt is not None:
-            self.store.complete_action(tenant_id, action_id, receipt)
-        return receipt
+        checkpoint: dict[str, object] = {}
+        try:
+            action = self.store.get_action(tenant_id, action_id)
+            if action.state is ActionState.DISPATCHING:
+                action = self.store.mark_outcome_unknown(
+                    tenant_id,
+                    action_id,
+                    "recovery found an interrupted dispatch",
+                )
+            if action.state is not ActionState.OUTCOME_UNKNOWN:
+                raise ConflictError("action is not awaiting recovery")
+            spec = action.proposal.reconciliation
+            if spec is None:
+                return None
+            task = self.store.get_task(tenant_id, action.task_id)
+            self._restore_session(
+                tenant_id=tenant_id,
+                task_id=task.id,
+                driver=driver,
+                current_ordinal=task.current_ordinal,
+            )
+            query_origins = (
+                (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+            )
+            if not self.policy.allows_url(spec.url, query_origins):
+                raise ValueError("reconciliation URL origin is not allowed")
+            receipt = driver.reconcile(spec)
+            if receipt is not None:
+                self.store.complete_action(tenant_id, action_id, receipt)
+            checkpoint = self._session_checkpoint(
+                tenant_id=tenant_id,
+                task_id=task.id,
+                driver=driver,
+            )
+            return receipt
+        finally:
+            self.store.release_task(
+                tenant_id=tenant_id,
+                task_id=action.task_id,
+                owner=worker_id,
+                **checkpoint,
+            )
+
+    def _restore_session(
+        self,
+        *,
+        tenant_id: UUID,
+        task_id: UUID,
+        driver: BrowserDriver,
+        current_ordinal: int,
+    ) -> None:
+        checkpoint = self.store.load_task_session(tenant_id, task_id)
+        if checkpoint is None:
+            return
+        if checkpoint.format_version != SESSION_STATE_FORMAT_VERSION:
+            raise ConflictError("browser session checkpoint format is unsupported")
+        if checkpoint.checkpoint_ordinal > current_ordinal:
+            raise ConflictError("browser session checkpoint is ahead of task state")
+        if self.session_protector is None:
+            raise ConflictError("secure browser session restoration is unavailable")
+        restore = getattr(driver, "restore_storage_state", None)
+        if not callable(restore):
+            raise ConflictError("browser driver cannot restore durable session state")
+        state = self.session_protector.unprotect(
+            checkpoint.ciphertext,
+            tenant_id,
+            task_id,
+        )
+        restore(state, checkpoint.checkpoint_ordinal)
+
+    def _session_checkpoint(
+        self,
+        *,
+        tenant_id: UUID,
+        task_id: UUID,
+        driver: BrowserDriver,
+    ) -> dict[str, object]:
+        task = self.store.get_task(tenant_id, task_id)
+        if task.status is TaskStatus.AWAITING_RECOVERY:
+            # Recovery state is authoritative. Preserve the last pre-dispatch
+            # checkpoint without consulting a newly created browser at all.
+            return {}
+        if task.status in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.REJECTED,
+            TaskStatus.BLOCKED,
+        }:
+            return {}
+        if self.session_protector is None:
+            return {}
+        export = getattr(driver, "export_storage_state", None)
+        if not callable(export):
+            return {}
+        ciphertext = self.session_protector.protect(
+            export(),
+            tenant_id,
+            task_id,
+        )
+        return {
+            "checkpoint_ciphertext": ciphertext,
+            "checkpoint_format_version": SESSION_STATE_FORMAT_VERSION,
+            "checkpoint_ordinal": task.current_ordinal,
+            "checkpoint_expires_at": utc_now()
+            + timedelta(hours=self.session_retention_hours),
+        }
 
     def resolve_not_committed(
         self,
@@ -802,6 +1014,7 @@ class EffectBrowserService:
     ) -> None:
         if current_ordinal == 0:
             return
+        restored_ordinal = getattr(driver, "restored_checkpoint_ordinal", 0)
         for action in self.store.list_actions(tenant_id, task_id):
             if action.ordinal >= current_ordinal:
                 break
@@ -817,7 +1030,13 @@ class EffectBrowserService:
                 }
                 or (
                     action.proposal.kind is ActionKind.CLICK
-                    and action.proposal.target_interaction in {"navigation", "option"}
+                    and (
+                        action.proposal.target_interaction in {"navigation", "option"}
+                        or (
+                            action.proposal.target_interaction == "consent"
+                            and action.ordinal >= restored_ordinal
+                        )
+                    )
                 )
                 or (replay_uploads and action.proposal.kind is ActionKind.UPLOAD)
             ):
@@ -865,6 +1084,47 @@ class EffectBrowserService:
                 captured_at=now,
             )
         return driver.execute(proposal)
+
+
+def _transmission_blocked_message(proposal: ProposedAction) -> str:
+    if proposal.kind is ActionKind.UPLOAD:
+        return (
+            "file selection triggered an unreviewed request and was blocked before "
+            "transmission"
+        )
+    if (
+        proposal.kind is ActionKind.SUBMIT
+        and proposal.outgoing_review is not None
+        and proposal.outgoing_review.requests
+    ):
+        return (
+            "outgoing request changed after approval and was blocked before transmission"
+        )
+    return (
+        "browser action triggered an unreviewed request and was blocked before "
+        "transmission"
+    )
+
+
+def _stale_replans_already_used(actions: list[BrowserAction]) -> int:
+    """Recover the current consecutive replan budget from durable actions."""
+    skipped_current = False
+    count = 0
+    for action in reversed(actions):
+        if not skipped_current and action.state in {
+            ActionState.PENDING,
+            ActionState.INVALIDATED,
+        }:
+            skipped_current = True
+            continue
+        if (
+            action.state is ActionState.SUPERSEDED
+            and action.failure == STALE_PROPOSAL_FAILURE
+        ):
+            count += 1
+            continue
+        break
+    return count
 
 
 def _validate_finish_expectation(

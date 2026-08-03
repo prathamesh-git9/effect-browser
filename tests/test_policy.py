@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from effect_browser.domain import (
     ActionKind,
     Locator,
@@ -52,12 +54,97 @@ def test_observed_option_click_is_reversible_while_other_clicks_keep_gates() -> 
     assert ambiguous.risk is RiskClass.EXTERNAL_COMMIT
 
 
+def test_rejecting_optional_cookies_does_not_require_commit_authority() -> None:
+    action = ProposedAction(
+        kind=ActionKind.CLICK,
+        locator=Locator(selector="#reject-all", adaptive_id="reject-all:0"),
+        description="Reject optional cookies.",
+        target_interaction="consent",
+        target_name="Reject all",
+    )
+
+    decision = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")
+
+    assert decision.allowed is True
+    assert decision.risk is RiskClass.INPUT
+    assert decision.requires_approval is False
+
+
+def test_navigation_click_policy_checks_the_bound_href_origin() -> None:
+    action = ProposedAction(
+        kind=ActionKind.CLICK,
+        locator=Locator(selector="#next", adaptive_id="next:0"),
+        url="https://redirected.example.test/checkout",
+        description="Follow one observed navigation link.",
+        target_interaction="navigation",
+        target_name="Continue",
+    )
+
+    denied = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")
+    allowed = ActionPolicy((BASE_URL, "https://redirected.example.test")).evaluate(
+        action,
+        f"{BASE_URL}/form",
+    )
+
+    assert denied.allowed is False
+    assert "origin is not allowed" in denied.reason
+    assert allowed.allowed is True
+    assert allowed.risk is RiskClass.READ
+
+
 def test_sensitive_fill_is_rejected_by_accessible_name() -> None:
     action = ProposedAction(
         kind=ActionKind.FILL,
         locator=Locator(role="textbox", name="API secret"),
         value="not-a-real-secret",
         description="Attempt to fill a secret field.",
+    )
+
+    decision = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")
+
+    assert decision.allowed is False
+    assert "credential" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "target_name",
+    ("Password", "Card number", "cardNumber", "CVV", "CVC"),
+)
+def test_sensitive_fill_is_rejected_for_selector_bound_semantics(
+    target_name: str,
+) -> None:
+    action = ProposedAction(
+        kind=ActionKind.FILL,
+        locator=Locator(selector="#generated-control", adaptive_id="payment-field:0"),
+        value="must-never-be-transmitted",
+        description="Attempt to fill a selector-bound sensitive field.",
+        target_name=target_name,
+    )
+
+    decision = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")
+
+    assert decision.allowed is False
+    assert "credential" in decision.reason
+
+
+def test_short_sensitive_tokens_do_not_match_inside_unrelated_field_names() -> None:
+    action = ProposedAction(
+        kind=ActionKind.FILL,
+        locator=Locator(selector="#shipping-city", adaptive_id="shipping-city:0"),
+        value="Dublin",
+        description="Fill a non-sensitive shipping city.",
+        target_name="Shipping city",
+    )
+
+    assert ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form").allowed
+
+
+def test_sensitive_selector_with_numeric_suffix_is_rejected() -> None:
+    action = ProposedAction(
+        kind=ActionKind.FILL,
+        locator=Locator(selector="#password1", adaptive_id="generated-field:0"),
+        value="must-never-be-transmitted",
+        description="Attempt to fill a suffixed credential field.",
     )
 
     decision = ActionPolicy((BASE_URL,)).evaluate(action, f"{BASE_URL}/form")

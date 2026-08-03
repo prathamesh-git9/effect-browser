@@ -26,6 +26,15 @@ COMMIT_WORDS = re.compile(
     r"book|reserve|pay|apply now|complete application)\b",
     re.IGNORECASE,
 )
+PRIVACY_PRESERVING_CONSENT_WORDS = re.compile(
+    r"^(reject|decline|deny)( all| optional)?( cookies)?$|"
+    r"^(only|use only) (necessary|essential)( cookies)?$|"
+    r"^continue without accepting$|"
+    r"^(cookie|privacy) (preferences|choices|settings)$|"
+    r"^manage (cookie|privacy) (preferences|choices|settings)$|"
+    r"^manage (cookies|privacy)$",
+    re.IGNORECASE,
+)
 
 
 class ScraplingSnapshotter:
@@ -132,7 +141,7 @@ class ScraplingSnapshotter:
         matches = page.relocate(saved, percentage=55, selector_type=True)
         if len(matches) != 1:
             return None
-        return str(matches[0].generate_full_css_selector)
+        return self._selector(page, matches[0])
 
     def _page(self, html: str, url: str) -> Selector:
         return Selector(
@@ -226,6 +235,7 @@ class ScraplingSnapshotter:
     @staticmethod
     def _selector(page: Selector, element: ScraplingElement) -> str:
         """Prefer identity selectors that also work through open shadow roots."""
+        element_id = str(element.attrib.get("id", "")).strip()
         for attribute in ("id", "data-testid"):
             value = str(element.attrib.get(attribute, "")).strip()
             if not value:
@@ -234,7 +244,27 @@ class ScraplingSnapshotter:
             selector = f'[{attribute}="{escaped}"]'
             if len(page.css(selector)) == 1:
                 return selector
-        return str(element.generate_full_css_selector)
+        generated = str(element.generate_full_css_selector)
+        if element_id:
+            escaped_id = element_id.replace("\\", "\\\\").replace('"', '\\"')
+            generated = generated.replace(
+                f"#{element_id}",
+                f'[id="{escaped_id}"]',
+            )
+        generated = re.sub(
+            r"#([0-9][A-Za-z0-9_-]*)",
+            lambda match: f'[id="{match.group(1)}"]',
+            generated,
+        )
+        try:
+            if len(page.css(generated)) == 1:
+                return generated
+        except Exception:
+            # Scrapling can emit invalid CSS for otherwise legal HTML ids such as
+            # `id="828933"`. XPath keeps the candidate exact without guessing at
+            # browser-specific identifier escaping.
+            pass
+        return f"xpath={element.generate_full_xpath_selector}"
 
     @staticmethod
     def _interaction(
@@ -246,16 +276,30 @@ class ScraplingSnapshotter:
             return "download"
         if href:
             return "navigation"
+        tag = str(element.tag).casefold()
         input_type = str(element.attrib.get("type", "")).casefold()
         if input_type == "file":
             return "upload"
-        if input_type == "submit":
+        form_associated = bool(str(element.attrib.get("form", "")).strip()) or bool(
+            element.xpath("ancestor::form")
+        )
+        submit_control = input_type in {"submit", "image"} or (
+            tag == "button" and not input_type and form_associated
+        )
+        if submit_control:
             return "commit"
-        if str(element.attrib.get("role", "")).strip().casefold() == "option":
+        non_submitting_button = (
+            tag == "button" and input_type in {"", "button"} and not form_associated
+        ) or (tag == "input" and input_type == "button" and not form_associated)
+        if non_submitting_button and PRIVACY_PRESERVING_CONSENT_WORDS.fullmatch(
+            name.strip()
+        ):
+            return "consent"
+        if str(element.attrib.get("role", "")).strip().casefold() in {"option", "tab"}:
             return "option"
         if COMMIT_WORDS.search(name):
             return "commit"
-        if str(element.tag).casefold() in {"input", "textarea", "select"}:
+        if tag in {"input", "textarea", "select"}:
             return "input"
         return "ambiguous"
 
