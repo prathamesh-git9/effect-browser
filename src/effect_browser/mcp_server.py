@@ -157,7 +157,7 @@ def create_mcp_server():
         extra_origins = (
             (task.start_url,) if task.autonomy.allow_query_target_origin else ()
         )
-        browser = driver(extra_origins)
+        browser = driver(extra_origins, task_id=task.id, tenant_id=tenant)
         try:
             result = service.run(
                 tenant_id=tenant,

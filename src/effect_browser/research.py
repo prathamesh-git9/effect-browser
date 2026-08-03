@@ -34,9 +34,17 @@ class ResearchSource(BaseModel):
     captured_at: datetime
 
 
+class ResearchSourceFailure(BaseModel):
+    requested_url: HttpUrl
+    error_type: str = Field(min_length=1, max_length=100)
+    detail: str = Field(min_length=1, max_length=500)
+    failed_at: datetime
+
+
 class ResearchReport(BaseModel):
     question: str = Field(min_length=1, max_length=2_000)
-    sources: tuple[ResearchSource, ...] = Field(min_length=1, max_length=5)
+    sources: tuple[ResearchSource, ...] = Field(max_length=5)
+    failures: tuple[ResearchSourceFailure, ...] = Field(default=(), max_length=5)
     limitations: tuple[str, ...]
     generated_at: datetime
 
@@ -56,7 +64,6 @@ def capture_research(
 
     if not 1 <= len(urls) <= 5:
         raise ValueError("research requires between one and five source URLs")
-    sources: list[ResearchSource] = []
     for requested in urls:
         parsed = urlparse(requested)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -65,25 +72,47 @@ def capture_research(
             raise ValueError(
                 f"research origin is not allowed: {parsed.scheme}://{parsed.netloc}"
             )
-        driver.execute(
-            ProposedAction(
-                kind=ActionKind.NAVIGATE,
-                url=requested,
-                description=(
-                    "Read the allowlisted source without executing a form effect."
-                ),
+    sources: list[ResearchSource] = []
+    failures: list[ResearchSourceFailure] = []
+    for requested in urls:
+        try:
+            driver.execute(
+                ProposedAction(
+                    kind=ActionKind.NAVIGATE,
+                    url=requested,
+                    description=(
+                        "Read the allowlisted source without executing a form effect."
+                    ),
+                )
             )
+            snapshot = driver.snapshot()
+            sources.append(_source(requested, snapshot))
+        except Exception as exc:
+            # Driver exceptions can embed response or page text. Preserve the typed
+            # per-source failure without reflecting that untrusted content.
+            detail = "source capture failed before rendered evidence was retained"
+            failures.append(
+                ResearchSourceFailure(
+                    requested_url=requested,
+                    error_type=type(exc).__name__[:100],
+                    detail=detail,
+                    failed_at=utc_now(),
+                )
+            )
+    limitations = [
+        "Research captures rendered evidence; it does not prove factual truth.",
+        "No submit, click, fill, upload, login, or booking action is executed.",
+        "Only configured origins are visited and page text may be incomplete.",
+    ]
+    if failures:
+        limitations.append(
+            f"{len(failures)} source capture(s) failed; successful sources remain usable."
         )
-        snapshot = driver.snapshot()
-        sources.append(_source(requested, snapshot))
     return ResearchReport(
         question=question,
         sources=tuple(sources),
-        limitations=(
-            "Research captures rendered evidence; it does not prove factual truth.",
-            "No submit, click, fill, upload, login, or booking action is executed.",
-            "Only configured origins are visited and page text may be incomplete.",
-        ),
+        failures=tuple(failures),
+        limitations=tuple(limitations),
         generated_at=utc_now(),
     )
 

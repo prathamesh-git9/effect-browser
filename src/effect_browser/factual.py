@@ -83,12 +83,29 @@ def deterministic_required_choice(
                 "Automatic execution stopped."
             ),
         )
+    privacy_rejection = next(
+        (
+            candidate
+            for candidate in candidates
+            if not candidate.disabled and candidate.interaction == "consent"
+        ),
+        None,
+    )
+    if privacy_rejection is not None:
+        return StepChoice(
+            kind=ActionKind.CLICK,
+            candidate_id=privacy_rejection.id,
+            description=(
+                f"Dismiss the privacy wall using {privacy_rejection.name!r} without "
+                "accepting optional cookies."
+            ),
+        )
     facts_by_name = {fact.field_name: fact for fact in facts}
     expanded = next(
         (
             candidate
             for candidate in candidates
-            if candidate.role == "combobox" and candidate.expanded
+            if candidate.required and candidate.role == "combobox" and candidate.expanded
         ),
         None,
     )
@@ -135,7 +152,7 @@ def deterministic_required_choice(
             ),
         )
     for candidate in candidates:
-        if candidate.disabled or candidate.filled:
+        if candidate.disabled or candidate.filled or not candidate.required:
             continue
         if candidate.interaction == "upload":
             if document_path is None or document_sha256 is None:

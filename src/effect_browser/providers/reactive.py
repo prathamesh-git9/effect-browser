@@ -174,7 +174,12 @@ def bind_choice(
     return ProposedAction(
         kind=choice.kind,
         locator=candidate.locator,
-        url=candidate.href if choice.kind is ActionKind.DOWNLOAD else None,
+        url=(
+            candidate.href
+            if choice.kind is ActionKind.DOWNLOAD
+            or (choice.kind is ActionKind.CLICK and candidate.interaction == "navigation")
+            else None
+        ),
         value=choice.value,
         checked=choice.checked,
         key=choice.key,

@@ -33,6 +33,7 @@ from effect_browser.providers import DeterministicPlanner, ReactiveBootstrapPlan
 from effect_browser.providers.base import Planner, ProviderError
 from effect_browser.providers.http import (
     _output_text,
+    _post_read_only_provider,
     _raise_provider_error,
     _strict_schema,
 )
@@ -185,7 +186,8 @@ class GroundedTargetResolver:
                 f"{self.runtime.api_key_env} is required for query-only target search"
             )
         try:
-            response = self.client.post(
+            response = _post_read_only_provider(
+                self.client,
                 f"{self.runtime.base_url}/responses",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
@@ -268,7 +270,7 @@ class AutopilotCoordinator:
         self.service = service
         self.settings = settings
         self.planner_factory = planner_factory or self._planner
-        self.driver_factory = driver_factory or self._driver
+        self.driver_factory = driver_factory
         self.resolver_factory = resolver_factory or GroundedTargetResolver
 
     def execute(
@@ -395,7 +397,7 @@ class AutopilotCoordinator:
         result: RunResult | None = None
         for _session in range(5):
             try:
-                browser = self.driver_factory((start_url,))
+                browser = self._open_driver(tenant_id, task.id, (start_url,))
             except Exception as exc:
                 blocked = self.service.store.block_task(
                     tenant_id,
@@ -447,7 +449,22 @@ class AutopilotCoordinator:
             return DeterministicPlanner()
         return ReactiveBootstrapPlanner(runtime.name)
 
-    def _driver(self, query_origins: tuple[str, ...]) -> BrowserDriver:
+    def _open_driver(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        query_origins: tuple[str, ...],
+    ) -> BrowserDriver:
+        if self.driver_factory is not None:
+            return self.driver_factory(query_origins)
+        return self._driver(tenant_id, task_id, query_origins)
+
+    def _driver(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+        query_origins: tuple[str, ...],
+    ) -> BrowserDriver:
         return PlaywrightDriver(
             executable_path=self.settings.browser_executable,
             headless=self.settings.browser_headless,

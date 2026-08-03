@@ -40,6 +40,7 @@ from effect_browser.domain import (
 from effect_browser.providers.base import ProviderError
 from effect_browser.providers.http import (
     _output_text,
+    _post_read_only_provider,
     _raise_provider_error,
     _strict_schema,
 )
@@ -1023,7 +1024,8 @@ def _provider_request(
     if tools:
         body["tools"] = tools
     try:
-        response = client.post(
+        response = _post_read_only_provider(
+            client,
             f"{runtime.base_url}/responses",
             headers={"Authorization": f"Bearer {api_key}"},
             json=body,

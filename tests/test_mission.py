@@ -1008,6 +1008,32 @@ def test_responses_mission_planner_uses_a_strict_bounded_dag_schema(
     assert [step.key for step in plan.steps] == ["first", "second", "answer"]
 
 
+def test_mission_call_does_not_retry_an_ambiguous_protocol_error(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.RemoteProtocolError("ambiguous disconnect", request=request)
+
+    monkeypatch.setenv("TEST_MISSION_API_KEY", "synthetic")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
+    planner = ResponsesMissionPlanner(
+        ProviderRuntime(
+            name="openai-reactive",
+            model="test-model",
+            api_key_env="TEST_MISSION_API_KEY",
+            base_url="https://provider.example/v1",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ProviderError, match="RemoteProtocolError"):
+        planner.plan("Find a source.", external_commit_authorized=False)
+
+    assert attempts == 1
+
+
 def test_synthesis_rejects_citations_not_present_in_dependency_evidence(
     monkeypatch,
 ) -> None:

@@ -23,6 +23,7 @@ def candidate(
     *,
     interaction: str = "input",
     input_type: str | None = "text",
+    required: bool = True,
 ) -> ElementCandidate:
     return ElementCandidate(
         id="C001",
@@ -30,7 +31,7 @@ def candidate(
         role="textbox",
         name=name,
         input_type=input_type,
-        required=True,
+        required=required,
         interaction=interaction,
         locator=Locator(
             selector="body > input",
@@ -85,6 +86,56 @@ def test_missing_or_unverified_consequential_fact_requires_handoff() -> None:
     assert "no value was invented" in missing.description
     assert unverified is not None
     assert unverified.kind is ActionKind.HANDOFF
+
+
+def test_privacy_rejection_is_selected_before_remote_planning() -> None:
+    choice = deterministic_required_choice(
+        text_excerpt="We value your privacy and use cookies.",
+        candidates=(
+            candidate("One way", interaction="option", input_type=None),
+            candidate("Reject all", interaction="consent", input_type=None),
+        ),
+        facts=(),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert choice is not None
+    assert choice.kind is ActionKind.CLICK
+    assert choice.candidate_id == "C001"
+    assert "without accepting optional cookies" in choice.description
+
+
+def test_optional_profile_field_is_left_to_reactive_planning() -> None:
+    optional_newsletter = candidate(
+        "Newsletter email",
+        input_type="email",
+        required=False,
+    )
+
+    missing = deterministic_required_choice(
+        text_excerpt="Get occasional travel offers.",
+        candidates=(optional_newsletter,),
+        facts=(),
+        document_path=None,
+        document_sha256=None,
+    )
+    verified = deterministic_required_choice(
+        text_excerpt="Get occasional travel offers.",
+        candidates=(optional_newsletter,),
+        facts=(
+            fact(
+                "newsletter_email",
+                "traveller@example.test",
+                VerificationState.VERIFIED,
+            ),
+        ),
+        document_path=None,
+        document_sha256=None,
+    )
+
+    assert missing is None
+    assert verified is None
 
 
 def test_verified_fact_and_task_document_become_local_deterministic_choices(

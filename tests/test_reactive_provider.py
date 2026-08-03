@@ -18,6 +18,7 @@ def page_snapshot(tmp_path: Path):
           <input id="insurance" type="checkbox">
           <label for="region">Region</label>
           <select id="region"><option value="ie">Ireland</option></select>
+          <a href="/next-step">Continue to the next step</a>
           <a href="/manual.txt" download>Download manual</a>
           <label for="resume">Résumé</label><input id="resume" type="file">
           <button type="submit">Submit application</button>
@@ -232,6 +233,26 @@ def test_generic_choices_bind_only_to_compatible_scrapling_candidates(
             snapshot,
             effect_reference="EB-12345678",
         )
+
+
+def test_navigation_click_retains_observed_destination(tmp_path: Path) -> None:
+    snapshot = page_snapshot(tmp_path)
+    link = next(
+        item for item in snapshot.candidates if item.name == "Continue to the next step"
+    )
+
+    proposal = bind_choice(
+        StepChoice(
+            kind=ActionKind.CLICK,
+            candidate_id=link.id,
+            description="Follow the observed next-step link.",
+        ),
+        snapshot,
+        effect_reference="EB-12345678",
+    )
+
+    assert proposal.target_interaction == "navigation"
+    assert proposal.url == "https://jobs.example.test/next-step"
 
 
 def open_combobox_snapshot(tmp_path: Path):
