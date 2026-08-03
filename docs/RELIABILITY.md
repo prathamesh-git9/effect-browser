@@ -53,11 +53,15 @@ completed search.
 | Combined flight research, second compound attempt | Google Flights, Emirates, Qatar Airways | failed | The Google child completed, the Emirates child ended on `ReadTimeout`, and comparison/browser steps were skipped. | A provider timeout in a required dependency prevented synthesis and booking work. |
 | Combined research rerun after fixes | Google Flights, Emirates, Qatar Airways | failed | Google navigation timed out; Emirates rendered; Qatar returned 403; no fare comparison was produced. | The run encountered both navigation timeout and remote denial, while the Emirates capture alone contained no completed itinerary. |
 | Final combined research capture | Google Flights, Emirates, Qatar Airways | failed | All three surfaces were captured, but they showed consent/privacy/access-denied states rather than itinerary results or fares. | Capturing blocked landing surfaces did not satisfy the fare-research mission. |
+| Post-green Emirates preflight | Emirates | failed | The initial navigation proposal failed at `about:blank`; no request reached Emirates. | The fresh low-level task omitted the target origin from its allowlist. Because this was proven pre-dispatch, one corrected fresh mission was safe. |
+| Post-green Emirates authorized continuation | Emirates | blocked | The genuine page rendered with Dublin selected and its privacy wall open. The next `Cookie preferences` action emitted an unreviewed write, which was blocked before transmission. | The transmission wall failed closed on privacy telemetry. No arrival, date, search, results, personal data, login, newsletter, or payment surface was reached. |
 
 Evidence: `artifacts/realworld/flight-research/`,
 `artifacts/realworld/flight-research-after-fixes/`,
 `artifacts/realworld/flight-research-final/`, and the compound records in
-`artifacts/realworld/flight-booking/private-mission.db`.
+`artifacts/realworld/flight-booking/private-mission.db`. Post-green evidence is in
+`artifacts/realworld/flight-booking/post-ci-emirates-20260803/` and
+`artifacts/realworld/flight-booking/post-ci-emirates-authorized-20260803/`.
 
 ### Standalone booking-task ledger
 
@@ -102,9 +106,10 @@ crash window.
 | Direct request-bin crash attempt | Webhook.site disposable request bin | failed | Exact outgoing-request review found zero reviewable requests, so preview was denied before send. | The test never established a dispatch candidate or crash window. No retry occurred. |
 | HTTP-form crash attempt | `httpbin` live HTML form to a Webhook.site disposable request bin | failed | The approved submit ended `outcome_unknown` / awaiting recovery; the request bin observed zero matching POSTs. | The hard-crash dispatch window was not proven. Ambiguity was preserved and no retry occurred. |
 | WebSocket-witness crash attempt | `httpbin` live HTML form to a Webhook.site disposable request bin | failed | The live witness did not prove the dispatch window. | The external side effect could not be verified, so the task remained conservative and was not retried. |
-| TCP-witness crash attempt | Local TCP witness around the live flow | failed | The retained database contains zero tasks, actions, or events and there is no terminal result. | The root cause was not retained; this report does not speculate beyond the surviving evidence. |
+| TCP-witness crash attempt | HTTPBin, a disposable Webhook.site bin, and a local TCP witness | failed | The single post-green continuation completed one read-only navigation, then stopped before approval, commit dispatch, TCP witness, hard kill, or recovery. The webhook ledger contained zero POSTs. | The provider produced only a read-risk navigation action; the engine terminalized that task with no next action, while the harness required an approval-gated submit candidate. No retry occurred. |
 
-Evidence: `artifacts/realworld/live-crash/`.
+Evidence: `artifacts/realworld/live-crash/`, including the post-green sanitized
+diagnostic at `attempt-4-tcp/post-run-diagnostic.sanitized.json`.
 
 ## Evidence handling and limits
 
