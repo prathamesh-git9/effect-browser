@@ -670,6 +670,12 @@ def _is_incidental_commit_usage(normalized: str, match: re.Match[str]) -> bool:
         after,
     ):
         return True
+    if verb == "submit" and re.search(
+        r"\b(?:word|phrase|term|verb)$",
+        before,
+    ):
+        # Metalinguistic mentions cannot supply the intent key for commit authority.
+        return True
     return verb == "sign" and re.match(r"of\b", after) is not None
 
 

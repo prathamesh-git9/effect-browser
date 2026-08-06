@@ -28,7 +28,7 @@ duplicate_attempts=0`.
 
 ## What the tests prove
 
-Default-branch verification reports **233 passed and 1 skipped**; `ruff check .` and
+Default-branch verification reports **241 passed and 1 skipped**; `ruff check .` and
 `ruff format --check .` also pass. The skipped case is the opt-in live Grok test,
 which requires both `RUN_LIVE_GROK=1` and an API key.
 
@@ -89,6 +89,15 @@ saying it finished is insufficient.
 Planner-authored browser-step text is not passed back as user authority and cannot
 inject a target URL. Mission-owned child tasks are executable only through their
 parent mission, whose lease is heartbeated during long browser work.
+
+That boundary is now tested adversarially rather than assumed. A planner response
+claiming its own permission — `"approved": true`, `"authority": "granted"`,
+`"human_approved_by"`, `"commit": true` — still yields `authorized: False`, and the same
+holds for injected instructions arriving through task text or retrieved page content.
+Sensitive-field guards survive repeated confident requests, and an ungranted committing
+action stops before anything is transmitted. Writing those tests surfaced one real hole:
+the phrase *"the word submit"* could supply the commit-intent key, so metalinguistic
+mentions are now treated as incidental.
 
 The low-level `POST /v1/autopilot` surface still runs exactly one browser task. If that
 task has no URL, the selected provider must use hosted web search to ground a start
