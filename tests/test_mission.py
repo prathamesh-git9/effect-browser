@@ -950,6 +950,51 @@ def test_grounded_research_requires_tool_use_and_preserves_provider_citations(
     assert result.citation_urls == ("https://docs.example/source",)
 
 
+def test_grounded_research_bounds_oversized_provider_summary(monkeypatch) -> None:
+    summary = "evidence " * 600
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps({"summary": summary}),
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://docs.example/source",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            },
+        )
+
+    monkeypatch.setenv("TEST_MISSION_API_KEY", "synthetic")
+    researcher = ResponsesResearcher(
+        ProviderRuntime(
+            name="test",
+            model="test-model",
+            api_key_env="TEST_MISSION_API_KEY",
+            base_url="https://provider.example/v1",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = researcher.search("Find the official source.")
+
+    assert result.summary == summary[:4_000]
+    assert result.citation_urls == ("https://docs.example/source",)
+
+
 def test_responses_mission_planner_uses_a_strict_bounded_dag_schema(
     monkeypatch,
 ) -> None:
@@ -1006,6 +1051,32 @@ def test_responses_mission_planner_uses_a_strict_bounded_dag_schema(
     assert schema["properties"]["steps"]["maxItems"] == 8
     assert schema["additionalProperties"] is False
     assert [step.key for step in plan.steps] == ["first", "second", "answer"]
+
+
+def test_mission_call_does_not_retry_an_ambiguous_protocol_error(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.RemoteProtocolError("ambiguous disconnect", request=request)
+
+    monkeypatch.setenv("TEST_MISSION_API_KEY", "synthetic")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
+    planner = ResponsesMissionPlanner(
+        ProviderRuntime(
+            name="openai-reactive",
+            model="test-model",
+            api_key_env="TEST_MISSION_API_KEY",
+            base_url="https://provider.example/v1",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ProviderError, match="RemoteProtocolError"):
+        planner.plan("Find a source.", external_commit_authorized=False)
+
+    assert attempts == 1
 
 
 def test_synthesis_rejects_citations_not_present_in_dependency_evidence(

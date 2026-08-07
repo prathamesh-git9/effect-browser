@@ -12,6 +12,7 @@ def _candidate(
     input_type: str | None = None,
     disabled: bool = False,
     label: str = "field",
+    interaction: str = "input",
 ) -> ElementCandidate:
     return ElementCandidate(
         id=id,
@@ -20,7 +21,7 @@ def _candidate(
         name=name,
         input_type=input_type,
         disabled=disabled,
-        interaction="input",
+        interaction=interaction,
         locator=Locator(label=label),
     )
 
@@ -71,6 +72,55 @@ def test_mfa_marker_is_detected() -> None:
     challenge = detect_challenge(snapshot)
     assert challenge is not None
     assert challenge.kind is HandoffKind.MFA
+
+
+def test_card_fields_stop_at_the_payment_boundary() -> None:
+    snapshot = _snapshot(
+        title="Payment",
+        text_excerpt="Enter your payment details.",
+        candidates=(
+            _candidate(id="generated-1", name="Card number", label="generated-1"),
+            _candidate(id="generated-2", name="Expiry date", label="generated-2"),
+            _candidate(id="generated-3", name="CVV", label="generated-3"),
+        ),
+    )
+
+    challenge = detect_challenge(snapshot)
+
+    assert challenge is not None
+    assert challenge.kind is HandoffKind.PAYMENT
+    assert "payment boundary" in challenge.reason
+
+
+def test_payment_discussion_without_card_fields_is_not_a_boundary() -> None:
+    snapshot = _snapshot(
+        title="Research",
+        text_excerpt="Compare payment providers and their published fees.",
+        candidates=(_candidate(name="Search", label="search"),),
+    )
+
+    assert detect_challenge(snapshot) is None
+
+
+def test_payment_context_with_pay_control_stops_when_hosted_fields_are_absent() -> None:
+    snapshot = _snapshot(
+        title="Choose payment method",
+        text_excerpt="Select a payment method to complete payment.",
+        candidates=(
+            _candidate(
+                role="button",
+                name="Confirm and pay",
+                label="generated-payment-control",
+                interaction="commit",
+            ),
+        ),
+    )
+
+    challenge = detect_challenge(snapshot)
+
+    assert challenge is not None
+    assert challenge.kind is HandoffKind.PAYMENT
+    assert "payment_commit_control" in challenge.evidence
 
 
 def test_captcha_takes_precedence_over_mfa() -> None:

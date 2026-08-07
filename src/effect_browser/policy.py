@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -12,17 +13,23 @@ from effect_browser.domain import (
 from effect_browser.uploads import UploadGuard, UploadValidationError
 
 SENSITIVE_LABELS = {
-    "password",
-    "passcode",
-    "one-time code",
-    "otp",
-    "credit card",
-    "card number",
-    "security code",
     "api key",
+    "card number",
+    "cardnumber",
+    "card security code",
+    "cc number",
+    "ccnumber",
+    "cvc",
+    "cvv",
+    "credit card",
+    "debit card",
+    "one time code",
+    "otp",
+    "passcode",
+    "password",
     "pin",
     "secret",
-    "cvv",
+    "security code",
 }
 SAFE_PRESS_KEYS = {
     "arrowdown",
@@ -66,16 +73,19 @@ class ActionPolicy:
                 reason=f"origin is not allowed: {self._origin(target_url)}",
             )
         if action.kind is ActionKind.FILL:
-            locator_text = " ".join(
+            semantic_text = _semantic_text(
                 filter(
                     None,
                     (
+                        action.target_name,
                         action.locator.label if action.locator else None,
                         action.locator.name if action.locator else None,
+                        action.locator.test_id if action.locator else None,
+                        action.locator.selector if action.locator else None,
                     ),
                 )
-            ).casefold()
-            if any(token in locator_text for token in SENSITIVE_LABELS):
+            )
+            if _contains_sensitive_semantics(semantic_text):
                 return PolicyDecision(
                     allowed=False,
                     risk=RiskClass.INPUT,
@@ -166,6 +176,16 @@ class ActionPolicy:
                         "form preparation"
                     ),
                 )
+            if action.target_interaction == "consent":
+                return PolicyDecision(
+                    allowed=True,
+                    risk=RiskClass.INPUT,
+                    requires_approval=False,
+                    reason=(
+                        "rejecting optional cookies is privacy-preserving local "
+                        "preparation"
+                    ),
+                )
             if action.target_interaction == "ambiguous":
                 return PolicyDecision(
                     allowed=True,
@@ -252,3 +272,22 @@ class ActionPolicy:
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return "invalid"
         return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _semantic_text(values) -> str:
+    """Normalize bound element identity without inspecting the proposed value."""
+
+    joined = " ".join(str(value) for value in values)
+    # Live Scrapling locators normally use CSS selectors, while the accessible
+    # field name is retained separately as target_name. Normalize both camelCase
+    # and selector punctuation so a cardNumber or cc-number field cannot evade the
+    # same fail-closed policy that protects role/name locators.
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", joined)
+    return re.sub(r"[^a-z0-9]+", " ", separated.casefold()).strip()
+
+
+def _contains_sensitive_semantics(value: str) -> bool:
+    return any(
+        re.search(rf"(?<![a-z]){re.escape(token)}(?![a-z])", value) is not None
+        for token in SENSITIVE_LABELS
+    )

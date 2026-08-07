@@ -13,6 +13,16 @@ from effect_browser.domain import (
 
 
 class BrowserDriver(Protocol):
+    restored_checkpoint_ordinal: int
+
+    def restore_storage_state(
+        self,
+        storage_state: dict[str, object],
+        checkpoint_ordinal: int,
+    ) -> None: ...
+
+    def export_storage_state(self) -> dict[str, object]: ...
+
     def observe(self) -> Observation: ...
 
     def snapshot(self) -> PageSnapshot: ...

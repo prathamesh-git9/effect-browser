@@ -45,6 +45,7 @@ from effect_browser.providers import (
     ReactiveBootstrapPlanner,
 )
 from effect_browser.research import capture_research
+from effect_browser.session import available_session_state_protector
 from effect_browser.store import ConflictError, DatabaseStore, NotFoundError
 
 REQUESTS = Counter(
@@ -87,6 +88,11 @@ def get_service() -> EffectBrowserService:
             "openai-reactive": OpenAIReactivePlanner(settings.openai_model),
             "grok-reactive": GrokReactivePlanner(settings.grok_model),
         },
+        session_protector=available_session_state_protector(
+            encryption_key=settings.session_encryption_key,
+            max_bytes=settings.session_state_max_bytes,
+        ),
+        session_retention_hours=settings.session_retention_hours,
     )
 
 
@@ -124,7 +130,12 @@ def planner(name: str):
     return planners[name]
 
 
-def driver(extra_allowed_origins: tuple[str, ...] = ()) -> PlaywrightDriver:
+def driver(
+    extra_allowed_origins: tuple[str, ...] = (),
+    *,
+    task_id: UUID | None = None,
+    tenant_id: UUID | None = None,
+) -> PlaywrightDriver:
     settings = get_settings()
     return PlaywrightDriver(
         executable_path=settings.browser_executable,
@@ -489,7 +500,7 @@ def run_task(
             f"task is owned by mission {mission_id}; resume the parent mission"
         )
     extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
-    browser = driver(extra_origins)
+    browser = driver(extra_origins, task_id=task.id, tenant_id=who.tenant_id)
     try:
         return service.run(tenant_id=who.tenant_id, task_id=task_id, driver=browser)
     finally:
@@ -569,7 +580,7 @@ def reconcile_action(
     action = service.store.get_action(who.tenant_id, action_id)
     task = service.store.get_task(who.tenant_id, action.task_id)
     extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
-    browser = driver(extra_origins)
+    browser = driver(extra_origins, task_id=task.id, tenant_id=who.tenant_id)
     try:
         receipt = service.reconcile(
             tenant_id=who.tenant_id,

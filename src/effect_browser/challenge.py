@@ -18,6 +18,7 @@ from effect_browser.domain import ElementCandidate, PageSnapshot
 class HandoffKind(StrEnum):
     CAPTCHA = "captcha"
     MFA = "mfa"
+    PAYMENT = "payment"
 
 
 class HandoffChallenge(BaseModel):
@@ -69,6 +70,23 @@ _MFA_MARKERS: tuple[str, ...] = (
     "six-digit code",
 )
 
+_PAYMENT_CONTEXT_MARKERS: tuple[str, ...] = (
+    "billing details",
+    "card details",
+    "complete payment",
+    "credit card",
+    "debit card",
+    "payment details",
+    "payment method",
+    "secure payment",
+)
+_PAYMENT_CONTROL_MARKERS: tuple[str, ...] = (
+    "complete payment",
+    "confirm and pay",
+    "make payment",
+    "pay now",
+)
+
 
 def _first_marker(text: str, markers: tuple[str, ...]) -> str | None:
     for marker in markers:
@@ -88,6 +106,24 @@ def _candidate_text(candidate: ElementCandidate) -> str:
         candidate.locator.test_id or "",
     )
     return " ".join(parts).lower()
+
+
+def _payment_field_categories(text: str) -> set[str]:
+    normalized = " ".join(text.replace("_", " ").replace("-", " ").split())
+    compact = normalized.replace(" ", "")
+    categories: set[str] = set()
+    if "card number" in normalized or "cardnumber" in compact or "ccnumber" in compact:
+        categories.add("card_number")
+    if any(marker in normalized for marker in ("cvv", "cvc", "card security code")):
+        categories.add("card_security_code")
+    if any(
+        marker in normalized
+        for marker in ("card expiry", "card expiration", "expiry date", "expiration date")
+    ):
+        categories.add("card_expiry")
+    if "name on card" in normalized or "cardholder name" in normalized:
+        categories.add("cardholder")
+    return categories
 
 
 def detect_challenge(snapshot: PageSnapshot) -> HandoffChallenge | None:
@@ -121,4 +157,33 @@ def detect_challenge(snapshot: PageSnapshot) -> HandoffChallenge | None:
                 reason=("a multi-factor authentication step requires a human to proceed"),
                 evidence=f"{where} matched {marker!r}",
             )
+    page_has_payment_context = (
+        _first_marker(page_text, _PAYMENT_CONTEXT_MARKERS) is not None
+    )
+    payment_categories: set[str] = set()
+    payment_control = False
+    for candidate in snapshot.candidates:
+        if candidate.disabled:
+            continue
+        candidate_text = _candidate_text(candidate)
+        payment_categories.update(_payment_field_categories(candidate_text))
+        if candidate.interaction in {"ambiguous", "commit"} and _first_marker(
+            candidate_text,
+            _PAYMENT_CONTROL_MARKERS,
+        ):
+            payment_control = True
+    if (
+        "card_number" in payment_categories
+        or len(payment_categories) >= 2
+        or (page_has_payment_context and payment_categories)
+        or (page_has_payment_context and payment_control)
+    ):
+        signals = sorted(payment_categories)
+        if payment_control:
+            signals.append("payment_commit_control")
+        return HandoffChallenge(
+            kind=HandoffKind.PAYMENT,
+            reason=("the payment boundary was reached; payment entry is not authorized"),
+            evidence=("payment boundary signals matched " + ",".join(signals)),
+        )
     return None

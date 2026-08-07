@@ -1,5 +1,6 @@
 const state = {
   tasks: [],
+  missions: [],
   selected: null,
   detail: null,
   profiles: [],
@@ -7,6 +8,7 @@ const state = {
   mission: null,
 };
 const $ = (selector) => document.querySelector(selector);
+let missionProgressTimer = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -94,6 +96,32 @@ function toast(message) {
   setTimeout(() => node.classList.remove("show"), 2800);
 }
 
+function elapsedLabel(milliseconds) {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes ? `${minutes}m ${String(remainder).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+function startMissionProgress() {
+  const progress = $("#mission-progress");
+  const elapsed = $("#mission-elapsed");
+  const started = Date.now();
+  const update = () => {
+    elapsed.textContent = elapsedLabel(Date.now() - started);
+  };
+  if (missionProgressTimer !== null) clearInterval(missionProgressTimer);
+  progress.hidden = false;
+  update();
+  missionProgressTimer = setInterval(update, 1000);
+}
+
+function stopMissionProgress() {
+  if (missionProgressTimer !== null) clearInterval(missionProgressTimer);
+  missionProgressTimer = null;
+  $("#mission-progress").hidden = true;
+}
+
 async function mutate(button, work) {
   button.disabled = true;
   try {
@@ -101,6 +129,7 @@ async function mutate(button, work) {
     await loadTasks();
     if (state.selected) await selectTask(state.selected);
     if (state.mission) await loadMission(state.mission.mission.id);
+    await loadMissions();
     await verifyAudit();
   } catch (error) {
     toast(error.message);
@@ -119,6 +148,24 @@ async function loadTasks() {
   });
 }
 
+async function loadMissions() {
+  state.missions = await api("/v1/missions");
+  const selected = state.mission?.mission?.id;
+  $("#missions").innerHTML = state.missions.length
+    ? state.missions.map((mission) => `<button class="task-button ${mission.id === selected ? "active" : ""}" data-mission="${mission.id}"><strong>${escapeHtml(mission.plan_summary)}</strong><small>${escapeHtml(mission.status)} / ${mission.id.slice(0, 8)}</small></button>`).join("")
+    : '<p class="empty">No missions yet.</p>';
+  document.querySelectorAll("[data-mission]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await loadMission(button.dataset.mission);
+        await loadMissions();
+      } catch (error) {
+        toast(error.message);
+      }
+    });
+  });
+}
+
 async function selectTask(id) {
   state.selected = id;
   state.detail = await api(`/v1/tasks/${id}`);
@@ -129,6 +176,7 @@ async function selectTask(id) {
 function render() {
   const { task, actions, events } = state.detail;
   $("#empty-state").hidden = true;
+  $("#mission-view").hidden = true;
   $("#task-view").hidden = false;
   $("#task-id").textContent = `TASK ${task.id}`;
   $("#task-title").textContent = task.instruction;
@@ -158,9 +206,24 @@ function render() {
   renderGate(actions[task.current_ordinal]);
 }
 
+function renderMissionStepDetail(step, hasFinalAnswer) {
+  const output = step.output ?? {};
+  const useful = output.summary
+    ?? (hasFinalAnswer ? null : output.answer)
+    ?? output.message;
+  const outputHtml = typeof useful === "string" && useful.trim()
+    ? `<p class="mission-step-output"><strong>Persisted output</strong><br>${escapeHtml(useful.slice(0, 8000))}</p>`
+    : "";
+  const errorHtml = typeof step.error === "string" && step.error.trim()
+    ? `<p class="mission-step-error"><strong>Stopped here</strong><br>${escapeHtml(step.error.slice(0, 1500))}</p>`
+    : "";
+  return `${outputHtml}${errorHtml}`;
+}
+
 function renderMission(result) {
   state.mission = result;
   $("#empty-state").hidden = true;
+  $("#task-view").hidden = true;
   $("#mission-view").hidden = false;
   $("#mission-id").textContent = `MISSION ${result.mission.id}`;
   $("#mission-title").textContent = result.mission.plan_summary;
@@ -174,7 +237,8 @@ function renderMission(result) {
       <p>${escapeHtml(step.kind)}${step.depends_on.length
         ? ` / after ${escapeHtml(step.depends_on.join(", "))}`
         : " / independent"}</p>
-      <code>${escapeHtml(step.output_sha256 ? short(step.output_sha256, 20) : "no output")}</code></div>
+      <code>${escapeHtml(step.output_sha256 ? short(step.output_sha256, 20) : "no output")}</code>
+      ${renderMissionStepDetail(step, Boolean(result.final_answer))}</div>
       <span class="action-state">${escapeHtml(step.status.replaceAll("_", " "))}</span>
     </article>`).join("");
   const answer = $("#mission-answer");
@@ -329,19 +393,32 @@ async function verifyAudit() {
 
 $("#autopilot-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  await mutate(event.submitter, async () => {
-    const result = await api("/v1/missions", {
-      method: "POST",
-      body: JSON.stringify({
-        query: $("#autopilot-query").value,
-        allow_external_commit: $("#mission-allow-external-commit").checked,
-      }),
+  startMissionProgress();
+  try {
+    await mutate(event.submitter, async () => {
+      const result = await api("/v1/missions", {
+        method: "POST",
+        body: JSON.stringify({
+          query: $("#autopilot-query").value,
+          allow_external_commit: $("#mission-allow-external-commit").checked,
+        }),
+      });
+      renderMission(result);
+      state.selected = actualChildTaskId(result);
+      if (!state.selected) $("#task-view").hidden = true;
+      toast(`${result.verdict.replaceAll("_", " ")} / ${result.steps.length} steps`);
     });
-    renderMission(result);
-    state.selected = actualChildTaskId(result);
-    if (!state.selected) $("#task-view").hidden = true;
-    toast(`${result.verdict.replaceAll("_", " ")} / ${result.steps.length} steps`);
-  });
+  } finally {
+    stopMissionProgress();
+    try {
+      await loadMissions();
+      if (!state.mission && state.missions.length) {
+        await loadMission(state.missions[0].id);
+      }
+    } catch (error) {
+      toast(error.message);
+    }
+  }
 });
 
 $("#create-form").addEventListener("submit", async (event) => {
@@ -439,8 +516,19 @@ $("#run-mission").addEventListener("click", (event) => mutate(
 ));
 $("#refresh").addEventListener("click", async () => {
   await loadTasks();
+  await loadMissions();
   if (state.selected) await selectTask(state.selected);
-  if (state.mission) await loadMission(state.mission.mission.id);
+  if (state.mission) {
+    await loadMission(state.mission.mission.id);
+  } else if (state.missions.length) {
+    await loadMission(state.missions[0].id);
+  }
   await verifyAudit();
 });
-Promise.all([loadTasks(), loadProfiles(), verifyAudit()]).catch((error) => toast(error.message));
+
+async function initializeDashboard() {
+  await Promise.all([loadTasks(), loadMissions(), loadProfiles(), verifyAudit()]);
+  if (state.missions.length) await loadMission(state.missions[0].id);
+}
+
+initializeDashboard().catch((error) => toast(error.message));

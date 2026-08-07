@@ -19,11 +19,14 @@ from effect_browser.research import capture_research
 class ResearchDriver:
     snapshots: dict[str, PageSnapshot]
     visited: list[str] = field(default_factory=list)
+    failures: dict[str, Exception] = field(default_factory=dict)
 
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         assert action.kind is ActionKind.NAVIGATE
         assert action.url is not None
         self.visited.append(action.url)
+        if failure := self.failures.get(action.url):
+            raise failure
         return BrowserReceipt(
             external_id="read-only-navigation",
             url=action.url,
@@ -63,15 +66,41 @@ def test_research_captures_rendered_sources_with_hashes() -> None:
 
 
 def test_research_rejects_unallowlisted_sources_before_navigation() -> None:
-    driver = ResearchDriver({})
+    allowed = "https://research.example/source"
+    driver = ResearchDriver({allowed: snapshot(allowed, "Source", "Evidence")})
     with pytest.raises(ValueError, match="origin is not allowed"):
         capture_research(
             question="No external browsing",
-            urls=("https://blocked.example/source",),
+            urls=(allowed, "https://blocked.example/source"),
             driver=driver,
             policy=ActionPolicy(("https://research.example",)),
         )
     assert driver.visited == []
+
+
+def test_research_preserves_source_failure_and_continues() -> None:
+    failed = "https://research.example/unavailable"
+    captured = "https://research.example/available"
+    driver = ResearchDriver(
+        {captured: snapshot(captured, "Available", "Surviving evidence")},
+        failures={failed: RuntimeError("temporary source failure")},
+    )
+
+    report = capture_research(
+        question="Compare the available sources.",
+        urls=(failed, captured),
+        driver=driver,
+        policy=ActionPolicy(("https://research.example",)),
+    )
+
+    assert driver.visited == [failed, captured]
+    assert [str(item.requested_url) for item in report.sources] == [captured]
+    assert [str(item.requested_url) for item in report.failures] == [failed]
+    assert report.failures[0].error_type == "RuntimeError"
+    assert report.failures[0].detail == (
+        "source capture failed before rendered evidence was retained"
+    )
+    assert any("1 source capture" in item for item in report.limitations)
 
 
 def test_research_limits_source_count() -> None:

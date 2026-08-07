@@ -134,7 +134,11 @@ def test_provider_schema_references_resolve_at_root() -> None:
 
 
 def test_provider_http_error_is_safe_and_actionable(monkeypatch) -> None:
+    attempts = 0
+
     def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
         return httpx.Response(
             400,
             json={"error": {"message": "schema rejected without secret material"}},
@@ -154,10 +158,78 @@ def test_provider_http_error_is_safe_and_actionable(monkeypatch) -> None:
                 start_url="https://example.test",
             )
         )
+    assert attempts == 1
+
+
+def test_provider_post_bounds_pre_dispatch_retries(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectTimeout("connection timed out", request=request)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
+    planner = OpenAIPlanner(
+        "test-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ProviderError, match="ConnectTimeout"):
+        planner.plan(
+            PlanRequest(
+                task_id=uuid4(),
+                instruction="Open the start page.",
+                start_url="https://example.test",
+            )
+        )
+
+    assert attempts == 3
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError],
+)
+def test_provider_post_does_not_retry_ambiguous_dispatch_failures(
+    monkeypatch,
+    error_type: type[httpx.HTTPError],
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise error_type("ambiguous provider failure", request=request)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
+    planner = OpenAIPlanner(
+        "test-model",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(ProviderError, match=error_type.__name__):
+        planner.plan(
+            PlanRequest(
+                task_id=uuid4(),
+                instruction="Open the start page.",
+                start_url="https://example.test",
+            )
+        )
+
+    assert attempts == 1
 
 
 def test_reactive_provider_selects_one_fresh_candidate(monkeypatch) -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("temporary connection failure", request=request)
         return httpx.Response(
             200,
             json={
@@ -177,6 +249,7 @@ def test_reactive_provider_selects_one_fresh_candidate(monkeypatch) -> None:
         )
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
     planner = OpenAIReactivePlanner(
         "test-model",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
@@ -217,6 +290,7 @@ def test_reactive_provider_selects_one_fresh_candidate(monkeypatch) -> None:
 
     assert choice.candidate_id == "C001"
     assert choice.kind.value == "click"
+    assert attempts == 2
 
 
 def test_remote_plan_cannot_authorize_a_local_upload(monkeypatch, tmp_path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 
 import httpx
@@ -29,6 +30,34 @@ _SUPPORTED_STRICT_STRING_FORMATS = frozenset(
         "uuid",
     }
 )
+_READ_ONLY_PROVIDER_MAX_ATTEMPTS = 3
+_READ_ONLY_PROVIDER_RETRY_DELAYS = (0.05, 0.1)
+# HTTPX reports these only while establishing a connection or acquiring one from
+# the pool. Read/write/protocol failures are deliberately excluded because the
+# provider may already have received the POST.
+_RETRYABLE_PRE_DISPATCH_PROVIDER_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+)
+
+
+def _post_read_only_provider(
+    client: httpx.Client,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Retry a provider POST only when the transport proves it was not dispatched."""
+
+    for attempt in range(_READ_ONLY_PROVIDER_MAX_ATTEMPTS):
+        try:
+            return client.post(url, **kwargs)
+        except _RETRYABLE_PRE_DISPATCH_PROVIDER_ERRORS:
+            if attempt + 1 == _READ_ONLY_PROVIDER_MAX_ATTEMPTS:
+                raise
+            time.sleep(_READ_ONLY_PROVIDER_RETRY_DELAYS[attempt])
+    raise RuntimeError("unreachable provider retry state")  # pragma: no cover
 
 
 def _strict_schema(value: Any) -> Any:
@@ -87,7 +116,8 @@ class ResponsesPlanner:
         if not api_key:
             raise RuntimeError(f"{self.api_key_env} is required for {self.name}")
         try:
-            response = self.client.post(
+            response = _post_read_only_provider(
+                self.client,
                 f"{self.base_url}/responses",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={
@@ -167,7 +197,8 @@ class ReactiveResponsesPlanner:
         if not api_key:
             raise ProviderError(f"{self.api_key_env} is required for {self.name}")
         try:
-            response = self.client.post(
+            response = _post_read_only_provider(
+                self.client,
                 f"{self.base_url}/responses",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json={

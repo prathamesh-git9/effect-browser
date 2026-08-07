@@ -3,8 +3,17 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from effect_browser.session import (
+    DEFAULT_SESSION_RETENTION_HOURS,
+    DEFAULT_SESSION_STATE_MAX_BYTES,
+    MAX_SESSION_RETENTION_HOURS,
+    MAX_SESSION_STATE_BYTES,
+    MIN_SESSION_STATE_BYTES,
+    decode_session_encryption_key,
+)
 
 
 class Settings(BaseSettings):
@@ -31,6 +40,17 @@ class Settings(BaseSettings):
     browser_headless: bool = True
     browser_sandbox: bool = True
     artifacts_directory: Path = Path("artifacts")
+    session_encryption_key: SecretStr | None = None
+    session_state_max_bytes: int = Field(
+        default=DEFAULT_SESSION_STATE_MAX_BYTES,
+        ge=MIN_SESSION_STATE_BYTES,
+        le=MAX_SESSION_STATE_BYTES,
+    )
+    session_retention_hours: int = Field(
+        default=DEFAULT_SESSION_RETENTION_HOURS,
+        ge=1,
+        le=MAX_SESSION_RETENTION_HOURS,
+    )
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000001")
     default_actor_id: str = "local-operator"
 
@@ -41,6 +61,14 @@ class Settings(BaseSettings):
             return tuple(
                 item.strip().rstrip("/") for item in value.split(",") if item.strip()
             )
+        return value
+
+    @field_validator("session_encryption_key", mode="before")
+    @classmethod
+    def validate_session_encryption_key(cls, value):
+        if value is None or value == "":
+            return None
+        decode_session_encryption_key(value)
         return value
 
     @field_validator("allowed_upload_roots", mode="before")

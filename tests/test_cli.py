@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,16 @@ from effect_browser.domain import (
     MissionVerdict,
 )
 from effect_browser.mcp_server import _absolute_document_path as mcp_document_path
+
+
+def test_ascii_safe_json_round_trips_unicode_on_cp1252() -> None:
+    payload = {"message": "R\u00e9sum\u00e9 ready \U0001f680", "status": "complete"}
+
+    rendered = cli._ascii_safe_json(payload)
+
+    assert rendered.isascii()
+    assert rendered.encode("cp1252").decode("cp1252") == rendered
+    assert json.loads(rendered) == payload
 
 
 def test_cli_and_mcp_reject_relative_document_paths(tmp_path: Path) -> None:
@@ -45,7 +56,7 @@ def test_worker_reports_one_task_failure_and_exits_cleanly(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
         "_driver",
-        lambda _origins: (_ for _ in ()).throw(RuntimeError("launch failed")),
+        lambda _origins, **_kwargs: (_ for _ in ()).throw(RuntimeError("launch failed")),
     )
 
     result = CliRunner().invoke(cli.app, ["worker", "--once"])
@@ -65,7 +76,13 @@ def test_do_requires_explicit_commit_flag_and_forwards_it(monkeypatch) -> None:
             calls.append(kwargs)
             return SimpleNamespace(
                 verdict=MissionVerdict.COMPLETED,
-                model_dump_json=lambda: '{"verdict":"completed"}',
+                model_dump_json=lambda: json.dumps(
+                    {
+                        "verdict": "completed",
+                        "message": "R\u00e9sum\u00e9 ready \U0001f680",
+                    },
+                    ensure_ascii=False,
+                ),
             )
 
     monkeypatch.setattr(
@@ -83,5 +100,48 @@ def test_do_requires_explicit_commit_flag_and_forwards_it(monkeypatch) -> None:
 
     assert without_grant.exit_code == 0
     assert with_grant.exit_code == 0
+    assert without_grant.stdout.isascii()
+    assert (
+        json.loads(without_grant.stdout)["message"] == "R\u00e9sum\u00e9 ready \U0001f680"
+    )
     assert calls[0]["allow_external_commit"] is False
     assert calls[1]["allow_external_commit"] is True
+
+
+def test_do_reports_progress_on_stderr_before_work_and_keeps_stdout_json(
+    monkeypatch,
+) -> None:
+    class Coordinator:
+        def __init__(self, **_kwargs):
+            pass
+
+        def execute(self, **_kwargs):
+            typer.echo("synthetic coordinator entered", err=True)
+            return SimpleNamespace(
+                verdict=MissionVerdict.COMPLETED,
+                model_dump_json=lambda: json.dumps(
+                    {
+                        "verdict": "completed",
+                        "message": "synthetic mission completed",
+                    }
+                ),
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "_service",
+        lambda: SimpleNamespace(store=SimpleNamespace()),
+    )
+    monkeypatch.setattr(cli, "MissionCoordinator", Coordinator)
+
+    result = CliRunner().invoke(cli.app, ["do", "Inspect the synthetic fixture."])
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines() == [
+        "Planning and running the mission; browser work is headless by default...",
+        "synthetic coordinator entered",
+    ]
+    assert json.loads(result.stdout) == {
+        "message": "synthetic mission completed",
+        "verdict": "completed",
+    }

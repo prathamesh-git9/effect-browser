@@ -36,10 +36,22 @@
           <label class="checkbox"><input id="mission-allow-external-commit"
             type="checkbox"> Grant at most one reviewed external commit</label>
           <button class="primary" type="submit">Plan and run mission</button>
+          <section id="mission-progress" class="mission-progress" role="status"
+            aria-live="polite" hidden>
+            <div><strong id="mission-progress-label">Planning and running mission</strong>
+              <span id="mission-elapsed">0s</span></div>
+            <p>Persisting the plan, running ready searches, and applying every browser
+              safety boundary. This can take several minutes.</p>
+          </section>
           <p class="contract">Independent research can run in parallel. The original
             query and this explicit grant are both required for any commit.
             Decomposition cannot invent authority or extra submissions.</p>
         </form>
+        <div class="divider"></div>
+        <section>
+          <div class="panel-head"><div><p class="kicker">MISSION HISTORY</p><h2>One-query runs</h2></div></div>
+          <div id="missions" class="tasks"><p class="empty">No missions yet.</p></div>
+        </section>
         <details class="advanced">
           <summary>Advanced task controls</summary>
           <form id="create-form">

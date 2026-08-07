@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -68,6 +70,8 @@ from effect_browser.observability import (
 )
 
 STORE_LOG = logging.getLogger("effect_browser.store")
+STALE_PROPOSAL_FAILURE = "page changed after reactive planning before dispatch"
+MAX_TASK_SESSION_CIPHERTEXT_BYTES = 16 * 1024 * 1024 + 64 * 1024
 _PENDING_METRICS_KEY = "effect_browser_committed_audit_transitions"
 _AUDIT_HASH = re.compile(r"^[0-9a-f]{64}$")
 _AUDIT_STEP_KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
@@ -120,6 +124,22 @@ class TaskRow(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     lease_owner: Mapped[str | None] = mapped_column(String(100), index=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TaskSessionRow(Base):
+    __tablename__ = "task_sessions"
+
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(String(36), index=True)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    format_version: Mapped[int] = mapped_column(Integer)
+    checkpoint_ordinal: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class MissionRow(Base):
@@ -327,6 +347,17 @@ class NotFoundError(StoreError):
 
 class ConflictError(StoreError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class TaskSessionCheckpoint:
+    """Opaque encrypted browser state and the metadata needed to fence its use."""
+
+    ciphertext: bytes
+    format_version: int
+    checkpoint_ordinal: int
+    updated_at: datetime
+    expires_at: datetime
 
 
 class DatabaseStore:
@@ -1418,14 +1449,140 @@ class DatabaseStore:
             if result.rowcount != 1:
                 raise ConflictError("worker lease was lost or expired")
 
-    def release_task(self, *, tenant_id: UUID, task_id: UUID, owner: str) -> None:
+    def load_task_session(
+        self,
+        tenant_id: UUID,
+        task_id: UUID,
+    ) -> TaskSessionCheckpoint | None:
+        """Load an unexpired opaque checkpoint without interpreting its ciphertext."""
+        now = utc_now()
+        terminal = {
+            TaskStatus.SUCCEEDED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.REJECTED.value,
+            TaskStatus.BLOCKED.value,
+        }
         with self.session() as session:
-            row = self._task_row(session, tenant_id, task_id)
-            if row.lease_owner != owner:
-                return
+            task = self._locked_task_row(session, tenant_id, task_id)
+            row = session.scalar(
+                select(TaskSessionRow)
+                .where(
+                    TaskSessionRow.task_id == str(task_id),
+                    TaskSessionRow.tenant_id == str(tenant_id),
+                )
+                .with_for_update()
+            )
+            if row is None:
+                return None
+            if task.status in terminal or _as_utc(row.expires_at) <= now:
+                session.delete(row)
+                return None
+            return TaskSessionCheckpoint(
+                ciphertext=bytes(row.ciphertext),
+                format_version=row.format_version,
+                checkpoint_ordinal=row.checkpoint_ordinal,
+                updated_at=_as_utc(row.updated_at),
+                expires_at=_as_utc(row.expires_at),
+            )
+
+    def release_task(
+        self,
+        *,
+        tenant_id: UUID,
+        task_id: UUID,
+        owner: str,
+        checkpoint_ciphertext: bytes | None = None,
+        checkpoint_format_version: int | None = None,
+        checkpoint_ordinal: int | None = None,
+        checkpoint_expires_at: datetime | None = None,
+    ) -> None:
+        now = utc_now()
+        terminal = {
+            TaskStatus.SUCCEEDED.value,
+            TaskStatus.FAILED.value,
+            TaskStatus.REJECTED.value,
+            TaskStatus.BLOCKED.value,
+        }
+        with self.session() as session:
+            row = self._locked_task_row(session, tenant_id, task_id)
+            if (
+                row.lease_owner != owner
+                or row.lease_expires_at is None
+                or _as_utc(row.lease_expires_at) <= now
+            ):
+                raise ConflictError("worker lease was lost or expired")
+
+            stored = session.scalar(
+                select(TaskSessionRow)
+                .where(
+                    TaskSessionRow.task_id == str(task_id),
+                    TaskSessionRow.tenant_id == str(tenant_id),
+                )
+                .with_for_update()
+            )
+            if row.status in terminal:
+                if stored is not None:
+                    session.delete(stored)
+            elif checkpoint_ciphertext is not None:
+                if not isinstance(checkpoint_ciphertext, bytes):
+                    raise ValueError("checkpoint ciphertext must be bytes")
+                if len(checkpoint_ciphertext) > MAX_TASK_SESSION_CIPHERTEXT_BYTES:
+                    raise ValueError("checkpoint ciphertext exceeds the storage limit")
+                if (
+                    not isinstance(checkpoint_format_version, int)
+                    or isinstance(checkpoint_format_version, bool)
+                    or checkpoint_format_version < 1
+                ):
+                    raise ValueError(
+                        "checkpoint format version must be a positive integer"
+                    )
+                if (
+                    not isinstance(checkpoint_ordinal, int)
+                    or isinstance(checkpoint_ordinal, bool)
+                    or checkpoint_ordinal < 0
+                ):
+                    raise ValueError("checkpoint ordinal must be a non-negative integer")
+                if checkpoint_ordinal != row.current_ordinal:
+                    raise ConflictError(
+                        "checkpoint ordinal does not match the task cursor"
+                    )
+                if not isinstance(checkpoint_expires_at, datetime):
+                    raise ValueError("checkpoint expiry must be a datetime")
+                expires_at = _as_utc(checkpoint_expires_at)
+                if expires_at <= now:
+                    raise ValueError("checkpoint expiry must be in the future")
+                if stored is None:
+                    stored = TaskSessionRow(
+                        task_id=str(task_id),
+                        tenant_id=str(tenant_id),
+                        ciphertext=checkpoint_ciphertext,
+                        format_version=checkpoint_format_version,
+                        checkpoint_ordinal=checkpoint_ordinal,
+                        updated_at=now,
+                        expires_at=expires_at,
+                    )
+                    session.add(stored)
+                else:
+                    stored.ciphertext = checkpoint_ciphertext
+                    stored.format_version = checkpoint_format_version
+                    stored.checkpoint_ordinal = checkpoint_ordinal
+                    stored.updated_at = now
+                    stored.expires_at = expires_at
+            elif any(
+                value is not None
+                for value in (
+                    checkpoint_format_version,
+                    checkpoint_ordinal,
+                    checkpoint_expires_at,
+                )
+            ):
+                raise ValueError(
+                    "checkpoint ciphertext and metadata must be provided together"
+                )
+
             row.lease_owner = None
             row.lease_expires_at = None
-            row.updated_at = utc_now()
+            row.updated_at = now
             row.version += 1
             self._append_event(
                 session,
@@ -1514,6 +1671,87 @@ class DatabaseStore:
                     "ordinal": row.ordinal,
                     "action_sha256": row.action_sha256,
                     "planned_from_sha256": proposal.planned_from_sha256,
+                },
+            )
+            session.flush()
+            return self._action(row)
+
+    def supersede_stale_proposal(
+        self,
+        *,
+        tenant_id: UUID,
+        action_id: UUID,
+        expected_version: int,
+        observation: Observation,
+    ) -> BrowserAction:
+        """Atomically retire a reactive proposal that was never dispatched."""
+        with self.session() as session:
+            row = self._locked_action_row(session, tenant_id, action_id)
+            if row.version != expected_version:
+                raise ConflictError("action version changed before supersession")
+            if ActionState(row.state) not in {
+                ActionState.PENDING,
+                ActionState.INVALIDATED,
+            }:
+                raise ConflictError(
+                    "only a pending or invalidated proposal can be superseded"
+                )
+            proposal = ProposedAction.model_validate(row.proposal)
+            if proposal.action_hash() != row.action_sha256:
+                raise ConflictError("stored action no longer matches its bound hash")
+            planned_from_sha256 = proposal.planned_from_sha256
+            if planned_from_sha256 is None:
+                raise ConflictError("proposal is not bound to a planning observation")
+            if planned_from_sha256 == observation.state_sha256:
+                raise ConflictError("proposal still matches the fresh observation")
+            if (
+                session.scalar(select(ReceiptRow).where(ReceiptRow.action_id == row.id))
+                is not None
+            ):
+                raise ConflictError("a proposal with a receipt cannot be superseded")
+            task = self._task_row(session, tenant_id, UUID(row.task_id))
+            if task.current_ordinal != row.ordinal:
+                raise ConflictError("stale proposal is no longer the task cursor")
+            if TaskStatus(task.status) not in {
+                TaskStatus.QUEUED,
+                TaskStatus.RUNNING,
+            }:
+                raise ConflictError(
+                    f"cannot supersede a proposal for a {task.status} task"
+                )
+            future = session.scalar(
+                select(ActionRow.id).where(
+                    ActionRow.task_id == row.task_id,
+                    ActionRow.ordinal > row.ordinal,
+                )
+            )
+            if future is not None:
+                raise ConflictError("stale supersession requires a reactive tail action")
+
+            released_effect_key = row.effect_key
+            row.effect_key = None
+            row.state = ActionState.SUPERSEDED.value
+            row.observation_sha256 = observation.state_sha256
+            row.observation_url = observation.url
+            row.failure = STALE_PROPOSAL_FAILURE
+            row.version += 1
+            task.current_ordinal = row.ordinal + 1
+            task.status = TaskStatus.QUEUED.value
+            task.updated_at = utc_now()
+            task.version += 1
+            self._append_event(
+                session,
+                tenant_id=tenant_id,
+                task_id=UUID(row.task_id),
+                action_id=action_id,
+                kind="action.stale_proposal_superseded",
+                payload={
+                    "action_sha256": row.action_sha256,
+                    "expected_observation_sha256": planned_from_sha256,
+                    "actual_observation_sha256": observation.state_sha256,
+                    "ordinal": row.ordinal,
+                    "effect_key_released": released_effect_key is not None,
+                    "automatic_retry": False,
                 },
             )
             session.flush()
@@ -2851,6 +3089,24 @@ class DatabaseStore:
                 TaskRow.id == str(task_id),
                 TaskRow.tenant_id == str(tenant_id),
             )
+        )
+        if row is None:
+            raise NotFoundError("task not found")
+        return row
+
+    @staticmethod
+    def _locked_task_row(
+        session: Session,
+        tenant_id: UUID,
+        task_id: UUID,
+    ) -> TaskRow:
+        row = session.scalar(
+            select(TaskRow)
+            .where(
+                TaskRow.id == str(task_id),
+                TaskRow.tenant_id == str(tenant_id),
+            )
+            .with_for_update()
         )
         if row is None:
             raise NotFoundError("task not found")

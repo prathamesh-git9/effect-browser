@@ -37,6 +37,7 @@ from effect_browser.providers import (
     ReactiveBootstrapPlanner,
 )
 from effect_browser.research import capture_research
+from effect_browser.session import available_session_state_protector
 from effect_browser.store import DatabaseStore
 
 app = typer.Typer(
@@ -44,6 +45,23 @@ app = typer.Typer(
     help="Durable multi-search and crash-safe browser operations.",
 )
 console = Console()
+
+
+def _ascii_safe_json(value: object) -> str:
+    """Return one machine-readable JSON value safe for legacy Windows consoles."""
+
+    parsed = json.loads(value) if isinstance(value, str) else value
+    return json.dumps(
+        parsed,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _print_json(value: object) -> None:
+    typer.echo(_ascii_safe_json(value))
 
 
 def _service() -> EffectBrowserService:
@@ -57,6 +75,11 @@ def _service() -> EffectBrowserService:
             "openai-reactive": OpenAIReactivePlanner(settings.openai_model),
             "grok-reactive": GrokReactivePlanner(settings.grok_model),
         },
+        session_protector=available_session_state_protector(
+            encryption_key=settings.session_encryption_key,
+            max_bytes=settings.session_state_max_bytes,
+        ),
+        session_retention_hours=settings.session_retention_hours,
     )
 
 
@@ -77,7 +100,12 @@ def _planner(name: str):
     return values[name]
 
 
-def _driver(extra_allowed_origins: tuple[str, ...] = ()) -> PlaywrightDriver:
+def _driver(
+    extra_allowed_origins: tuple[str, ...] = (),
+    *,
+    task_id: UUID | None = None,
+    tenant_id: UUID | None = None,
+) -> PlaywrightDriver:
     settings = get_settings()
     return PlaywrightDriver(
         executable_path=settings.browser_executable,
@@ -108,12 +136,7 @@ def initialize() -> None:
 @app.command("capabilities")
 def capabilities() -> None:
     """Print the executor's actual typed capability and guarantee catalog."""
-    console.print_json(
-        json.dumps(
-            [item.model_dump(mode="json") for item in capability_catalog()],
-            sort_keys=True,
-        )
-    )
+    _print_json([item.model_dump(mode="json") for item in capability_catalog()])
 
 
 @app.command()
@@ -156,7 +179,7 @@ def create_task(
             max_external_commits=max_external_commits,
         ),
     )
-    console.print_json(task.model_dump_json())
+    _print_json(task.model_dump_json())
 
 
 @app.command("do")
@@ -171,6 +194,10 @@ def do_browser_task(
     """Decompose and run one multi-search/browser mission from one query."""
     settings = get_settings()
     service = _service()
+    typer.echo(
+        "Planning and running the mission; browser work is headless by default...",
+        err=True,
+    )
     result = MissionCoordinator(
         store=service.store,
         autopilot=AutopilotCoordinator(service=service, settings=settings),
@@ -181,7 +208,7 @@ def do_browser_task(
         query=query,
         allow_external_commit=commit,
     )
-    console.print_json(result.model_dump_json())
+    _print_json(result.model_dump_json())
     if result.verdict not in {
         MissionVerdict.COMPLETED,
         MissionVerdict.VERIFIED_EFFECT,
@@ -210,7 +237,7 @@ def replay_mission(mission_id: UUID) -> None:
         settings.default_tenant_id,
         mission_id,
     )
-    typer.echo(canonical_json(timeline))
+    _print_json(canonical_json(timeline))
     if not timeline["audit"]["valid"]:
         raise typer.Exit(2)
 
@@ -229,7 +256,11 @@ def run_task(task_id: UUID) -> None:
             f"task is owned by mission {mission_id}; run the parent mission"
         )
     extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
-    browser = _driver(extra_origins)
+    browser = _driver(
+        extra_origins,
+        task_id=task.id,
+        tenant_id=settings.default_tenant_id,
+    )
     try:
         result = service.run(
             tenant_id=settings.default_tenant_id,
@@ -238,7 +269,7 @@ def run_task(task_id: UUID) -> None:
         )
     finally:
         browser.close()
-    console.print_json(result.model_dump_json())
+    _print_json(result.model_dump_json())
 
 
 @app.command("research")
@@ -257,7 +288,7 @@ def research(
         )
     finally:
         browser.close()
-    console.print_json(report.model_dump_json())
+    _print_json(report.model_dump_json())
 
 
 @app.command()
@@ -274,7 +305,7 @@ def approve(
         expected_version=expected_version,
         actor_id=actor,
     )
-    console.print_json(result.model_dump_json())
+    _print_json(result.model_dump_json())
 
 
 @app.command("resume-input")
@@ -291,25 +322,31 @@ def resume_input(
         expected_version=expected_version,
         actor_id=actor,
     )
-    console.print_json(result.model_dump_json())
+    _print_json(result.model_dump_json())
 
 
 @app.command()
 def reconcile(action_id: UUID) -> None:
     """Look up deterministic target evidence for an unknown outcome."""
     settings = get_settings()
-    browser = _driver()
+    service = _service()
+    action = service.store.get_action(settings.default_tenant_id, action_id)
+    task = service.store.get_task(settings.default_tenant_id, action.task_id)
+    extra_origins = (task.start_url,) if task.autonomy.allow_query_target_origin else ()
+    browser = _driver(
+        extra_origins,
+        task_id=task.id,
+        tenant_id=settings.default_tenant_id,
+    )
     try:
-        receipt = _service().reconcile(
+        receipt = service.reconcile(
             tenant_id=settings.default_tenant_id,
             action_id=action_id,
             driver=browser,
         )
     finally:
         browser.close()
-    console.print_json(
-        receipt.model_dump_json() if receipt else json.dumps({"found": False})
-    )
+    _print_json(receipt.model_dump_json() if receipt else {"found": False})
 
 
 @app.command("killer-demo")
@@ -325,7 +362,10 @@ def killer_demo(
         start_url=base_url,
         planner=DeterministicPlanner(),
     )
-    first = _driver()
+    first = _driver(
+        task_id=task.id,
+        tenant_id=settings.default_tenant_id,
+    )
     try:
         paused = service.run(
             tenant_id=settings.default_tenant_id,
@@ -345,7 +385,12 @@ def killer_demo(
         actor_id="killer-demo-operator",
     )
 
-    crashing = CrashAfterCommitDriver(_driver())
+    crashing = CrashAfterCommitDriver(
+        _driver(
+            task_id=task.id,
+            tenant_id=settings.default_tenant_id,
+        )
+    )
     try:
         service.run(
             tenant_id=settings.default_tenant_id,
@@ -357,7 +402,10 @@ def killer_demo(
     finally:
         crashing.close()
 
-    recovery = _driver()
+    recovery = _driver(
+        task_id=task.id,
+        tenant_id=settings.default_tenant_id,
+    )
     try:
         stopped = service.run(
             tenant_id=settings.default_tenant_id,
@@ -380,7 +428,10 @@ def killer_demo(
     if receipt is None:
         raise RuntimeError("target receipt could not be reconciled")
 
-    final_browser = _driver()
+    final_browser = _driver(
+        task_id=task.id,
+        tenant_id=settings.default_tenant_id,
+    )
     try:
         final = service.run(
             tenant_id=settings.default_tenant_id,
@@ -456,7 +507,11 @@ def worker(
                 (task.start_url,) if task.autonomy.allow_query_target_origin else ()
             )
             try:
-                browser = _driver(extra_origins)
+                browser = _driver(
+                    extra_origins,
+                    task_id=task.id,
+                    tenant_id=settings.default_tenant_id,
+                )
                 try:
                     result = service.run(
                         tenant_id=settings.default_tenant_id,

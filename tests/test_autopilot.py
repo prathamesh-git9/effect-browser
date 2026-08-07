@@ -619,6 +619,32 @@ def test_grounded_target_requires_web_search_and_keeps_citations(monkeypatch) ->
     assert resolved.research_urls == ("https://example.com/jobs/1",)
 
 
+def test_grounded_target_does_not_retry_an_ambiguous_read_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr("effect_browser.providers.http.time.sleep", lambda _delay: None)
+    attempts = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("ambiguous search timeout", request=request)
+
+    resolver = GroundedTargetResolver(
+        ProviderRuntime(
+            name="openai-reactive",
+            model="model",
+            api_key_env="OPENAI_API_KEY",
+            base_url="https://api.openai.com/v1",
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+
+    with pytest.raises(ProviderError, match="ReadTimeout"):
+        resolver.resolve("Find the official target.")
+
+    assert attempts == 1
+
+
 def test_grounded_target_rejects_model_memory_without_search(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     response = httpx.Response(

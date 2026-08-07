@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import re
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import (
     Browser,
-    BrowserContext,
     Frame,
     Page,
     Playwright,
@@ -42,6 +42,8 @@ from effect_browser.transmission import (
 from effect_browser.uploads import UploadGuard
 
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+NAVIGATION_PREFLIGHT_TIMEOUT_MS = 20_000
+MAX_NAVIGATION_REDIRECTS = 5
 
 
 class PlaywrightDriver:
@@ -80,12 +82,11 @@ class PlaywrightDriver:
             # misleading "inside the asyncio loop" error.
             self._playwright.stop()
             raise
-        self._context: BrowserContext = self._browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            service_workers="block",
+        self._snapshotter = ScraplingSnapshotter(
+            artifacts_directory / "scrapling-elements.db"
         )
-        self._context.route_web_socket("**/*", lambda socket: socket.close())
-        self._unreviewed_writes: list[str] = []
+        self._closed = False
+        self.restored_checkpoint_ordinal = 0
 
         def deny_unreviewed_writes(route: Route) -> None:
             method = route.request.method.upper()
@@ -102,20 +103,59 @@ class PlaywrightDriver:
             route.abort("blockedbyclient")
 
         self._deny_unreviewed_writes = deny_unreviewed_writes
+        try:
+            self._create_context()
+        except BaseException:
+            self._browser.close()
+            self._playwright.stop()
+            raise
+
+    def _create_context(self, storage_state: dict[str, object] | None = None) -> None:
+        context_options: dict[str, object] = {
+            "viewport": {"width": 1440, "height": 900},
+            "service_workers": "block",
+        }
+        if storage_state is not None:
+            context_options["storage_state"] = storage_state
+        self._context = self._browser.new_context(**context_options)
+        self._context.route_web_socket("**/*", lambda socket: socket.close())
+        self._unreviewed_writes: list[str] = []
         # This route is deliberately permanent. Exact upload/submit handlers are
         # registered later and use continue_ only after their bound review matches.
-        self._context.route("**/*", deny_unreviewed_writes)
+        self._context.route("**/*", self._deny_unreviewed_writes)
         self._context.tracing.start(screenshots=True, snapshots=True)
-        self._page: Page = self._context.new_page()
-        self._snapshotter = ScraplingSnapshotter(
-            artifacts_directory / "scrapling-elements.db"
-        )
+        self._page = self._context.new_page()
         self._rehydration_handler = None
         self._rehydration_origin: str | None = None
         self._rehydration_contains_upload = False
         self._rehydration_violations: list[str] = []
         self._armed_review: OutgoingReview | None = None
         self._preview_handler = None
+
+    def restore_storage_state(
+        self,
+        storage_state: dict[str, object],
+        checkpoint_ordinal: int,
+    ) -> None:
+        """Install authenticated browser state before any target navigation."""
+
+        if self._closed:
+            raise RuntimeError("browser driver is closed")
+        if self._page.url != "about:blank":
+            raise RuntimeError("storage state must be restored before target traffic")
+        if checkpoint_ordinal < 0:
+            raise ValueError("checkpoint ordinal must not be negative")
+        self._context.tracing.stop()
+        self._context.close()
+        self._create_context(storage_state)
+        self.restored_checkpoint_ordinal = checkpoint_ordinal
+
+    def export_storage_state(self) -> dict[str, object]:
+        """Return storage state in memory for encrypted durable checkpointing."""
+
+        if self._closed:
+            raise RuntimeError("browser driver is closed")
+        return self._context.storage_state(indexed_db=True)
 
     def observe(self) -> Observation:
         self._stabilize()
@@ -458,8 +498,24 @@ class PlaywrightDriver:
     def execute(self, action: ProposedAction) -> BrowserReceipt:
         blocked_before = len(self._unreviewed_writes)
         if action.kind is ActionKind.NAVIGATE:
-            self._navigation_origins.add(_origin(action.url or ""))
-            self._page.goto(action.url or "", wait_until="domcontentloaded")
+            planned_origin = _origin(action.url or "")
+            allowed_origins = self._top_level_navigation_origins() | {planned_origin}
+            handler, violations = self._arm_navigation_guard(allowed_origins)
+            navigation_error: PlaywrightError | None = None
+            try:
+                self._page.goto(action.url or "", wait_until="domcontentloaded")
+            except PlaywrightError as exc:
+                navigation_error = exc
+            finally:
+                self._context.unroute("**/*", handler=handler)
+            if violations:
+                raise TransmissionBlocked(
+                    "navigation redirect crossed the configured origin boundary "
+                    f"({violations[0]})"
+                )
+            if navigation_error is not None:
+                raise navigation_error
+            self._navigation_origins.add(planned_origin)
         elif action.kind is ActionKind.FILL:
             target = self._locator(action)
             if target.evaluate("element => element.tagName === 'SELECT'"):
@@ -566,11 +622,16 @@ class PlaywrightDriver:
             ActionKind.CLICK,
         }:
             self._page.wait_for_timeout(350)
-            if len(self._unreviewed_writes) != blocked_before:
+            blocked_write = len(self._unreviewed_writes) != blocked_before
+            if blocked_write and action.kind is not ActionKind.NAVIGATE:
                 raise TransmissionBlocked(
                     "a supposedly reversible browser action triggered an "
                     "unreviewed write; the request was blocked"
                 )
+            # A freshly loaded document can emit analytics or bot-detection POSTs
+            # before the user has supplied any page data. Those requests remain
+            # aborted by the permanent route, but they must not make a read-only
+            # top-level GET unusable. Interactions and rehydration stay fail-closed.
         return self._receipt(action.effect_key or f"local-{action.kind.value}")
 
     def _set_input_file(self, action: ProposedAction, upload) -> None:
@@ -790,6 +851,7 @@ class PlaywrightDriver:
     def reconcile(self, spec: ReconciliationSpec) -> BrowserReceipt | None:
         allowed_origins = {
             _origin(self._page.url),
+            _origin(spec.url),
             *self._allowed_origins,
             *self._navigation_origins,
         }
@@ -832,6 +894,9 @@ class PlaywrightDriver:
         return self._receipt(external_id)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         trace = self.artifacts_directory / f"{self.session_id}-trace.zip"
         try:
             self._context.tracing.stop(path=str(trace))
@@ -888,6 +953,36 @@ class PlaywrightDriver:
         return scope.get_by_role(locator.role or "", name=locator.name, exact=True)
 
     def _click_and_adopt_popup(self, action: ProposedAction) -> None:
+        allowed_origins = self._top_level_navigation_origins()
+        if (
+            action.target_interaction == "navigation"
+            and action.url is not None
+            and _origin(action.url) not in allowed_origins
+        ):
+            raise TransmissionBlocked(
+                "planned navigation crosses the configured origin boundary"
+            )
+        handler, violations = self._arm_navigation_guard(allowed_origins)
+        click_error: PlaywrightError | None = None
+        try:
+            self._click_and_adopt_popup_unchecked(action)
+        except PlaywrightError as exc:
+            click_error = exc
+        finally:
+            self._context.unroute("**/*", handler=handler)
+        if violations:
+            raise TransmissionBlocked(
+                "navigation redirect crossed the configured origin boundary "
+                f"({violations[0]})"
+            )
+        if click_error is not None:
+            raise click_error
+        if _origin(self._page.url) not in allowed_origins:
+            raise TransmissionBlocked(
+                "navigation finished outside the configured origin boundary"
+            )
+
+    def _click_and_adopt_popup_unchecked(self, action: ProposedAction) -> None:
         before = set(self._context.pages)
         self._locator(action).click(no_wait_after=True)
         deadline = time.monotonic() + 0.75
@@ -921,6 +1016,89 @@ class PlaywrightDriver:
             self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
         except PlaywrightTimeoutError:
             pass
+
+    def _top_level_navigation_origins(self) -> set[str]:
+        return {
+            _origin(self._page.url),
+            *self._allowed_origins,
+            *self._navigation_origins,
+        }
+
+    def _arm_navigation_guard(
+        self,
+        allowed_origins: set[str],
+    ) -> tuple[object, list[str]]:
+        violations: list[str] = []
+        followed_redirects = 0
+
+        def constrain_navigation(route: Route) -> None:
+            nonlocal followed_redirects
+            request = route.request
+            navigation_document = (
+                request.is_navigation_request() or request.resource_type == "document"
+            )
+            origin = _origin(request.url)
+            if navigation_document and origin not in allowed_origins:
+                violations.append(origin)
+                route.abort("blockedbyclient")
+                return
+            if navigation_document and urlsplit(request.url).scheme not in {
+                "http",
+                "https",
+            }:
+                # Playwright's request preflight cannot fetch file:// documents.
+                # Their origin has already been checked, and they cannot issue an
+                # HTTP Location response; script-driven cross-origin navigation is
+                # routed again and remains fenced below.
+                route.fallback()
+                return
+            if navigation_document and request.method.upper() in {"GET", "HEAD"}:
+                try:
+                    response = route.fetch(
+                        max_redirects=0,
+                        timeout=NAVIGATION_PREFLIGHT_TIMEOUT_MS,
+                    )
+                except PlaywrightError:
+                    violations.append("navigation-response-unavailable")
+                    route.abort("blockedbyclient")
+                    return
+                location = response.headers.get("location")
+                if 300 <= response.status < 400 and location:
+                    redirect_url = urljoin(request.url, location)
+                    redirect_origin = _origin(redirect_url)
+                    followed_redirects += 1
+                    if (
+                        redirect_origin not in allowed_origins
+                        or followed_redirects > MAX_NAVIGATION_REDIRECTS
+                    ):
+                        violations.append(
+                            redirect_origin
+                            if followed_redirects <= MAX_NAVIGATION_REDIRECTS
+                            else "redirect-budget-exhausted"
+                        )
+                        route.abort("blockedbyclient")
+                        return
+                    # Playwright does not re-route an HTTP Location hop after
+                    # route.fulfill(response=...). Replace the reviewed redirect
+                    # with a same-document transition so the destination is routed
+                    # and checked before its request is transmitted.
+                    route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=(
+                            "<!doctype html><meta charset=utf-8>"
+                            "<script>location.replace("
+                            f"{json.dumps(redirect_url, ensure_ascii=True)}"
+                            ")</script>"
+                        ),
+                    )
+                    return
+                route.fulfill(response=response)
+                return
+            route.fallback()
+
+        self._context.route("**/*", constrain_navigation)
+        return constrain_navigation, violations
 
     def _origin_allowed(self, url: str) -> bool:
         target = _origin(url)

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from effect_browser.browser.snapshot import ScraplingSnapshotter
 from effect_browser.domain import digest
 
@@ -75,6 +77,58 @@ def test_scrapling_extracts_cooperative_submission_contract(tmp_path: Path) -> N
     assert snapshot.submission_contract.receipt_test_id == "receipt"
 
 
+def test_observed_tab_button_is_a_reversible_option(tmp_path: Path) -> None:
+    html = """
+    <ul role="tablist">
+      <li><button role="tab" aria-selected="false" type="button">One way</button></li>
+    </ul>
+    """
+
+    snapshot = snapshotter(tmp_path).build(
+        html=html,
+        url="https://carrier.example.test/book",
+        title="Book",
+        state_sha256=digest(html),
+    )
+
+    assert len(snapshot.candidates) == 1
+    assert snapshot.candidates[0].role == "tab"
+    assert snapshot.candidates[0].interaction == "option"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Reject all", "Cookie preferences", "Manage privacy choices"],
+)
+def test_privacy_preserving_consent_controls_are_deterministic_choices(
+    tmp_path: Path,
+    label: str,
+) -> None:
+    html = f'<button id="privacy-control" type="button">{label}</button>'
+
+    snapshot = snapshotter(tmp_path).build(
+        html=html,
+        url="https://carrier.example.test/book",
+        title="Privacy",
+        state_sha256=digest(html),
+    )
+
+    assert snapshot.candidates[0].interaction == "consent"
+
+
+def test_form_associated_privacy_label_keeps_commit_semantics(tmp_path: Path) -> None:
+    html = '<form method="get"><button id="reject">Reject all</button></form>'
+
+    snapshot = snapshotter(tmp_path).build(
+        html=html,
+        url="https://carrier.example.test/book",
+        title="Privacy",
+        state_sha256=digest(html),
+    )
+
+    assert snapshot.candidates[0].interaction == "commit"
+
+
 def test_scrapling_relocates_saved_element_after_layout_drift(tmp_path: Path) -> None:
     parser = snapshotter(tmp_path)
     first = parser.build(
@@ -100,3 +154,25 @@ def test_scrapling_relocates_saved_element_after_layout_drift(tmp_path: Path) ->
 
     assert relocated is not None
     assert "button" in relocated
+
+
+def test_duplicate_numeric_ids_use_valid_attribute_selectors(tmp_path: Path) -> None:
+    html = """
+    <html><body>
+      <section><label>First <input id="828933" name="first"></label></section>
+      <div><label>Second <input id="828933" name="second"></label></div>
+    </body></html>
+    """
+
+    snapshot = snapshotter(tmp_path).build(
+        html=html,
+        url="https://carrier.example.test/book",
+        title="Book",
+        state_sha256=digest(html),
+    )
+
+    selectors = [candidate.locator.selector for candidate in snapshot.candidates]
+    assert len(selectors) == 2
+    assert all(selector and "#828933" not in selector for selector in selectors)
+    assert all(selector and '[id="828933"]' in selector for selector in selectors)
+    assert len(set(selectors)) == 2
